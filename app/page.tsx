@@ -35,7 +35,7 @@ import {
 } from '../lib/google-drive';
 import { withBasePath } from '../lib/base-path';
 
-type Section = 'home' | 'dashboard' | 'employees' | 'availability' | 'schedules';
+type Section = 'home' | 'dashboard' | 'employees' | 'availability' | 'schedules' | 'guide';
 type PeriodMode = 'thisWeek' | 'nextWeek' | 'twoWeeks' | 'custom';
 
 const SECTION_LABELS: Record<Section, string> = {
@@ -44,9 +44,10 @@ const SECTION_LABELS: Record<Section, string> = {
   employees: 'Employees',
   availability: 'Availability',
   schedules: 'Schedules',
+  guide: 'User Guide',
 };
 
-const WORKSPACE_SECTIONS: Section[] = ['home', 'employees', 'availability', 'schedules', 'dashboard'];
+const WORKSPACE_SECTIONS: Section[] = ['home', 'schedules', 'availability', 'employees', 'dashboard', 'guide'];
 
 const STORAGE_KEY = 'staffing-board-state-v1';
 const BACKUP_KEY = 'staffing-board-state-backup-v1';
@@ -186,18 +187,8 @@ function formatDayDate(date: Date) {
   });
 }
 
-function formatCompactDayDate(date: Date) {
-  return date.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  });
-}
-
-function formatDateInputLabel(value: string) {
-  const date = new Date(`${value}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return value;
-  return formatDayDate(date);
+function sectionHref(section: Section) {
+  return `#${section}`;
 }
 
 function sectionFromHash() {
@@ -396,6 +387,8 @@ export default function Page() {
   }
 
   function deleteEmployee(employeeId: string) {
+    const employee = state.employees.find((entry) => entry.id === employeeId);
+    if (employee && !window.confirm(`Delete ${employee.name}? This also removes their availability.`)) return;
     const nextAvailability = { ...state.availability };
     delete nextAvailability[employeeId];
     persistNextState({
@@ -542,6 +535,7 @@ export default function Page() {
   }
 
   function clearAllData() {
+    if (!window.confirm('Reset all data to the sample company? This replaces the current browser copy.')) return;
     const fresh = createSeedState();
     persistNextState(fresh);
     window.localStorage.setItem(BACKUP_KEY, JSON.stringify(fresh));
@@ -679,6 +673,7 @@ export default function Page() {
   }
 
   function clearScheduleOverrides() {
+    if (!window.confirm('Clear all manual schedule overrides for this browser copy?')) return;
     persistNextState({
       ...state,
       scheduleOverrides: {},
@@ -746,13 +741,14 @@ export default function Page() {
 
       <nav className="section-nav" aria-label="Sections">
         {WORKSPACE_SECTIONS.map((section) => (
-          <button
+          <a
             key={section}
             className={section === activeSection ? 'section-chip active' : 'section-chip'}
+            href={sectionHref(section)}
             onClick={() => goToSection(section)}
           >
             {SECTION_LABELS[section]}
-          </button>
+          </a>
         ))}
       </nav>
 
@@ -809,28 +805,39 @@ export default function Page() {
           </div>
           <section className="action-launcher">
             <ActionTile
-              title="Employees"
-              description="Names, roles, wages, hour limits, and priority."
-              buttonLabel="Open employees"
-              onClick={() => goToSection('employees')}
+              title="Schedules"
+              description="Business hours, staffing needs, review, publish, and PDF export."
+              buttonLabel="Open schedules"
+              href={sectionHref('schedules')}
+              onClick={() => goToSection('schedules')}
             />
             <ActionTile
               title="Availability"
               description="Weekly availability, unavailable blocks, and date exceptions."
               buttonLabel="Open availability"
+              href={sectionHref('availability')}
               onClick={() => goToSection('availability')}
             />
             <ActionTile
-              title="Schedules"
-              description="Business hours, staffing needs, review, publish, and PDF export."
-              buttonLabel="Open schedules"
-              onClick={() => goToSection('schedules')}
+              title="Employees"
+              description="Names, roles, wages, hour limits, and priority."
+              buttonLabel="Open employees"
+              href={sectionHref('employees')}
+              onClick={() => goToSection('employees')}
             />
             <ActionTile
               title="Dashboard"
               description="Quick totals for cost, hours, alerts, and schedule health."
               buttonLabel="Open dashboard"
+              href={sectionHref('dashboard')}
               onClick={() => goToSection('dashboard')}
+            />
+            <ActionTile
+              title="User Guide"
+              description="A plain-language walkthrough for the owner and managers."
+              buttonLabel="Open guide"
+              href={sectionHref('guide')}
+              onClick={() => goToSection('guide')}
             />
           </section>
         </section>
@@ -1140,20 +1147,48 @@ export default function Page() {
 
       {activeSection === 'schedules' && (
         <section className="panel-grid schedule-grid">
+          <article className="panel schedule-command">
+            <div className="workspace-heading">
+              <div>
+                <p className="eyebrow">Schedule Workspace</p>
+                <h2>{selectedPeriod.label}</h2>
+              </div>
+              <div className="row-actions">
+                <button className="primary-button" onClick={refreshSchedule}>
+                  Generate Schedule
+                </button>
+                <button className="ghost-button" onClick={() => window.print()}>
+                  Export Whiteboard Calendar PDF
+                </button>
+              </div>
+            </div>
+            <div className="schedule-steps" aria-label="Schedule workflow">
+              <div className="schedule-step">
+                <span>1</span>
+                <strong>Choose Dates</strong>
+                <p>{formatDayDate(selectedPeriod.start)} to {formatDayDate(selectedPeriod.end)}</p>
+              </div>
+              <div className="schedule-step">
+                <span>2</span>
+                <strong>Set Coverage</strong>
+                <p>{state.staffingRequirements.length} staffing block(s) and {activeEmployees.length} active employee(s)</p>
+              </div>
+              <div className={reviewedRange.alerts.some((alert) => alert.kind !== 'hours') ? 'schedule-step warn' : 'schedule-step good'}>
+                <span>3</span>
+                <strong>Review & Publish</strong>
+                <p>{reviewedRange.alerts.some((alert) => alert.kind !== 'hours') ? 'Resolve conflicts before publish' : 'Ready to publish or export'}</p>
+              </div>
+            </div>
+          </article>
+
           <article className="panel">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Schedules</p>
                 <h2>Selected period</h2>
               </div>
-              <button className="primary-button" onClick={refreshSchedule}>
-                Generate schedule
-              </button>
             </div>
             <PeriodSelector period={period} setPeriod={setPeriod} />
-            <p className="lede">
-              Build the schedule from the selected period, then export the calendar to PDF for the owner or manager.
-            </p>
             <div className="review-banner">
               <div>
                 <p className="eyebrow">Review</p>
@@ -1201,7 +1236,7 @@ export default function Page() {
             )}
             <div className="inline-actions">
               <button className="ghost-button" onClick={() => window.print()}>
-                Export calendar PDF
+                Export Whiteboard Calendar PDF
               </button>
               <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
                 Google Drive
@@ -1478,6 +1513,16 @@ export default function Page() {
           </article>
         </section>
       )}
+
+      {activeSection === 'guide' && (
+        <UserGuide
+          onOpenEmployees={() => goToSection('employees')}
+          onOpenAvailability={() => goToSection('availability')}
+          onOpenSchedules={() => goToSection('schedules')}
+          onOpenDashboard={() => goToSection('dashboard')}
+          onOpenDrive={() => setShowDriveMenu(true)}
+        />
+      )}
     </main>
   );
 }
@@ -1503,22 +1548,32 @@ function ActionTile({
   title,
   description,
   buttonLabel,
+  href,
   onClick,
 }: {
   title: string;
   description: string;
   buttonLabel: string;
+  href?: string;
   onClick: () => void;
 }) {
+  const action = href ? (
+    <a className="primary-button" href={href} onClick={onClick}>
+      {buttonLabel}
+    </a>
+  ) : (
+    <button className="primary-button" onClick={onClick}>
+      {buttonLabel}
+    </button>
+  );
+
   return (
     <article className="action-tile">
       <div>
         <p className="eyebrow">{title}</p>
         <p className="action-copy">{description}</p>
       </div>
-      <button className="primary-button" onClick={onClick}>
-        {buttonLabel}
-      </button>
+      {action}
     </article>
   );
 }
@@ -1646,6 +1701,116 @@ function PrintableScheduleCalendar({
         ))}
       </div>
     </div>
+  );
+}
+
+function UserGuide({
+  onOpenEmployees,
+  onOpenAvailability,
+  onOpenSchedules,
+  onOpenDashboard,
+  onOpenDrive,
+}: {
+  onOpenEmployees: () => void;
+  onOpenAvailability: () => void;
+  onOpenSchedules: () => void;
+  onOpenDashboard: () => void;
+  onOpenDrive: () => void;
+}) {
+  return (
+    <section className="guide-workspace">
+      <div className="workspace-heading">
+        <div>
+          <p className="eyebrow">User Guide</p>
+          <h2>How to build and publish a weekly schedule</h2>
+        </div>
+      </div>
+
+      <div className="guide-grid">
+        <article className="guide-section">
+          <span className="guide-number">1</span>
+          <div>
+            <h3>Add employees</h3>
+            <p>
+              Open Employees and enter each person&apos;s name, role, hourly wage, preferred hours, maximum hours, and priority level.
+              Higher priority employees are considered first when the schedule is generated.
+            </p>
+            <button className="ghost-button" onClick={onOpenEmployees}>Open Employees</button>
+          </div>
+        </article>
+
+        <article className="guide-section">
+          <span className="guide-number">2</span>
+          <div>
+            <h3>Enter availability</h3>
+            <p>
+              Open Availability, choose the employee, choose the period, then add the days and times that person can work. Use unavailable
+              hours for recurring conflicts, and use date-specific exceptions for one-time changes.
+            </p>
+            <button className="ghost-button" onClick={onOpenAvailability}>Open Availability</button>
+          </div>
+        </article>
+
+        <article className="guide-section">
+          <span className="guide-number">3</span>
+          <div>
+            <h3>Set business needs</h3>
+            <p>
+              Open Schedules and set the business hours and staffing requirements. A staffing requirement is the number of people needed
+              for a specific day and time block.
+            </p>
+            <button className="ghost-button" onClick={onOpenSchedules}>Open Schedules</button>
+          </div>
+        </article>
+
+        <article className="guide-section">
+          <span className="guide-number">4</span>
+          <div>
+            <h3>Generate and review</h3>
+            <p>
+              Tap Generate Schedule. The app checks availability, business hours, employee max hours, and priority. Review every slot in
+              the calendar. If needed, use the slot dropdowns to swap an employee or mark a slot unassigned.
+            </p>
+          </div>
+        </article>
+
+        <article className="guide-section">
+          <span className="guide-number">5</span>
+          <div>
+            <h3>Fix alerts before publishing</h3>
+            <p>
+              If the schedule has conflicts or understaffed blocks, the app will list them in Alerts. Fix the availability, staffing
+              requirement, or manual assignment before publishing.
+            </p>
+            <button className="ghost-button" onClick={onOpenDashboard}>Open Dashboard</button>
+          </div>
+        </article>
+
+        <article className="guide-section">
+          <span className="guide-number">6</span>
+          <div>
+            <h3>Publish and export</h3>
+            <p>
+              When the schedule is ready, tap Publish Reviewed Schedule. Then tap Export Whiteboard Calendar PDF to print or save a
+              posted team calendar.
+            </p>
+            <button className="primary-button" onClick={onOpenSchedules}>Open Schedule Export</button>
+          </div>
+        </article>
+
+        <article className="guide-section wide">
+          <span className="guide-number">7</span>
+          <div>
+            <h3>Back up the schedule</h3>
+            <p>
+              The app saves to the current browser automatically. Use Google Drive or Export JSON when you want a recovery copy before
+              making major changes or before handing the iPad to someone else.
+            </p>
+            <button className="ghost-button" onClick={onOpenDrive}>Open Google Drive Backup</button>
+          </div>
+        </article>
+      </div>
+    </section>
   );
 }
 

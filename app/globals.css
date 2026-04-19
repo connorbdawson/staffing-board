@@ -43,8 +43,23 @@ textarea {
   font: inherit;
 }
 
-button {
+button,
+a {
   touch-action: manipulation;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(31, 88, 73, 0.32);
+  outline-offset: 2px;
 }
 
 h1,
@@ -231,10 +246,15 @@ textarea {
   border-color: transparent;
 }
 
-.ghost-button {
+.ghost-button,
+.primary-button {
   cursor: pointer;
   min-height: 48px;
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 
 .ghost-button.small {
@@ -296,7 +316,8 @@ textarea {
 }
 
 .schedule-grid > .printable-area,
-.schedule-grid > .review-area {
+.schedule-grid > .review-area,
+.schedule-grid > .schedule-command {
   grid-column: 1 / -1;
 }
 
@@ -647,6 +668,50 @@ textarea {
   margin: 16px 0;
 }
 
+.schedule-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.schedule-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 4px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.schedule-step > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(22, 70, 59, 0.1);
+  font-weight: 800;
+  color: var(--accent);
+}
+
+.schedule-step p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--muted);
+}
+
+.schedule-step.good {
+  border-color: rgba(31, 122, 86, 0.28);
+}
+
+.schedule-step.warn {
+  border-color: rgba(182, 93, 33, 0.28);
+}
+
 .calendar-block {
   padding: 12px;
   display: grid;
@@ -810,9 +875,54 @@ textarea {
   color: #a0a8b3;
 }
 
+.guide-workspace {
+  display: grid;
+  gap: 18px;
+}
+
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.guide-section {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.guide-section.wide {
+  grid-column: 1 / -1;
+}
+
+.guide-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: rgba(22, 70, 59, 0.1);
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.guide-section p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
 @media (max-width: 1120px) {
   .summary-strip,
   .action-launcher,
+  .guide-grid,
+  .schedule-steps,
   .dashboard-grid,
   .panel-grid.two-up,
   .schedule-grid,
