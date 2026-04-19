@@ -1,5 +1,6 @@
 .DS_Store
 .next/
+.test-dist/
 node_modules/
 out/
 .env

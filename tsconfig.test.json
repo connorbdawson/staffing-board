@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": false,
+    "esModuleInterop": true,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": ".test-dist",
+    "rootDir": ".",
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": ["lib/staffing.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", ".next", "out"]
+}

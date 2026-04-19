@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import {
   DAYS,
+  addDays,
   dayFullLabel,
-  durationHours,
+  dayLabel,
   formatCurrency,
   formatTime,
-  generateSchedule,
   isoDateForWeekDay,
+  scheduleAssignmentKey,
+  generateScheduleRange,
+  checkScheduleFeasibility,
+  reviewScheduleRange,
   parseTime,
   uuid,
   validateState,
@@ -18,6 +22,7 @@ import {
   type DayKey,
   type Employee,
   type EmployeeAvailability,
+  type GeneratedScheduleRange,
   type StaffingRequirement,
 } from '../lib/staffing';
 import { createEmptyAvailability, createSeedState } from '../lib/seed';
@@ -30,17 +35,14 @@ import {
 } from '../lib/google-drive';
 import { withBasePath } from '../lib/base-path';
 
-type Section = 'dashboard' | 'employees' | 'availability' | 'hours' | 'requirements' | 'schedule' | 'costs' | 'alerts';
+type Section = 'dashboard' | 'employees' | 'availability' | 'schedules';
+type PeriodMode = 'thisWeek' | 'nextWeek' | 'twoWeeks' | 'custom';
 
 const SECTION_LABELS: Record<Section, string> = {
   dashboard: 'Dashboard',
   employees: 'Employees',
   availability: 'Availability',
-  hours: 'Business Hours',
-  requirements: 'Staffing',
-  schedule: 'Weekly Schedule',
-  costs: 'Cost Summary',
-  alerts: 'Alerts',
+  schedules: 'Schedules',
 };
 
 const STORAGE_KEY = 'staffing-board-state-v1';
@@ -48,31 +50,6 @@ const BACKUP_KEY = 'staffing-board-state-backup-v1';
 const DRIVE_BACKUP_ID_KEY = 'staffing-board-drive-backup-id-v1';
 const DRIVE_BACKUP_AT_KEY = 'staffing-board-drive-backup-at-v1';
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? '';
-
-function getInitialState(): AppState {
-  if (typeof window === 'undefined') return createSeedState();
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      const backup = window.localStorage.getItem(BACKUP_KEY);
-      if (!backup) return createSeedState();
-      const parsedBackup = JSON.parse(backup) as AppState;
-      return parsedBackup?.employees?.length ? parsedBackup : createSeedState();
-    }
-    const parsed = JSON.parse(raw) as AppState;
-    if (!parsed?.employees?.length) return createSeedState();
-    return parsed;
-  } catch {
-    try {
-      const backup = window.localStorage.getItem(BACKUP_KEY);
-      if (!backup) return createSeedState();
-      const parsedBackup = JSON.parse(backup) as AppState;
-      return parsedBackup?.employees?.length ? parsedBackup : createSeedState();
-    } catch {
-      return createSeedState();
-    }
-  }
-}
 
 function createEmployeeDraft(): Employee {
   return {
@@ -88,6 +65,53 @@ function createEmployeeDraft(): Employee {
   };
 }
 
+function createPeriodDraft() {
+  const weekStart = weekStartMonday(new Date());
+  return {
+    mode: 'thisWeek' as PeriodMode,
+    customStart: weekStart.toISOString().slice(0, 10),
+    customEnd: addDays(weekStart, 6).toISOString().slice(0, 10),
+  };
+}
+
+function normalizeState(value: Partial<AppState> | null | undefined): AppState {
+  const fallback = createSeedState();
+  return {
+    employees: value?.employees ?? fallback.employees,
+    availability: value?.availability ?? fallback.availability,
+    businessHours: value?.businessHours ?? fallback.businessHours,
+    staffingRequirements: value?.staffingRequirements ?? fallback.staffingRequirements,
+    scheduleOverrides: value?.scheduleOverrides ?? {},
+    schedulePublishedAt: value?.schedulePublishedAt ?? null,
+    updatedAt: value?.updatedAt ?? fallback.updatedAt,
+  };
+}
+
+function getInitialState(): AppState {
+  if (typeof window === 'undefined') return createSeedState();
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      const backup = window.localStorage.getItem(BACKUP_KEY);
+      if (!backup) return createSeedState();
+      const parsedBackup = JSON.parse(backup) as Partial<AppState>;
+      return parsedBackup?.employees?.length ? normalizeState(parsedBackup) : createSeedState();
+    }
+    const parsed = JSON.parse(raw) as Partial<AppState>;
+    if (!parsed?.employees?.length) return createSeedState();
+    return normalizeState(parsed);
+  } catch {
+    try {
+      const backup = window.localStorage.getItem(BACKUP_KEY);
+      if (!backup) return createSeedState();
+      const parsedBackup = JSON.parse(backup) as Partial<AppState>;
+      return parsedBackup?.employees?.length ? normalizeState(parsedBackup) : createSeedState();
+    } catch {
+      return createSeedState();
+    }
+  }
+}
+
 function updateAvailabilityMap(
   availability: Record<string, EmployeeAvailability>,
   employeeId: string,
@@ -100,10 +124,99 @@ function updateAvailabilityMap(
   };
 }
 
-function loadWeekStart(offsetWeeks: number) {
-  const now = new Date();
-  now.setDate(now.getDate() + offsetWeeks * 7);
-  return weekStartMonday(now);
+function resolvePeriod(period: { mode: PeriodMode; customStart: string; customEnd: string }) {
+  const thisWeek = weekStartMonday(new Date());
+  let start = new Date(thisWeek);
+  let end = addDays(thisWeek, 6);
+
+  if (period.mode === 'nextWeek') {
+    start = addDays(thisWeek, 7);
+    end = addDays(start, 6);
+  } else if (period.mode === 'twoWeeks') {
+    start = new Date(thisWeek);
+    end = addDays(thisWeek, 13);
+  } else if (period.mode === 'custom') {
+    const startDate = new Date(`${period.customStart}T12:00:00`);
+    const endDate = new Date(`${period.customEnd}T12:00:00`);
+    if (!Number.isNaN(startDate.getTime()) && !Number.isNaN(endDate.getTime())) {
+      const safeStart = startDate <= endDate ? startDate : endDate;
+      const safeEnd = startDate <= endDate ? endDate : startDate;
+      start = weekStartMonday(safeStart);
+      end = addDays(weekStartMonday(safeEnd), 6);
+    }
+  }
+
+  const weeks: Date[] = [];
+  let cursor = new Date(start);
+  while (cursor <= end) {
+    weeks.push(new Date(cursor));
+    cursor = addDays(cursor, 7);
+  }
+
+  return {
+    start,
+    end,
+    weeks,
+    label: `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+    })}`,
+  };
+}
+
+function formatRange(start: string, end: string) {
+  return `${formatTime(parseTime(start) ?? 0)} - ${formatTime(parseTime(end) ?? 0)}`;
+}
+
+function formatWeekLabel(start: Date, end: Date) {
+  return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  })}`;
+}
+
+function isDateInPeriod(date: string, start: Date, end: Date) {
+  const value = date.slice(0, 10);
+  const startValue = start.toISOString().slice(0, 10);
+  const endValue = end.toISOString().slice(0, 10);
+  return value >= startValue && value <= endValue;
+}
+
+function buildSortedRequirements(requirements: StaffingRequirement[]) {
+  return [...requirements].sort((a, b) => {
+    const dayDiff = DAYS.indexOf(a.day) - DAYS.indexOf(b.day);
+    if (dayDiff !== 0) return dayDiff;
+    return (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0);
+  });
+}
+
+function buildAssignmentsForRequirement(schedule: GeneratedScheduleRange['weeks'][number]['schedule'], requirementId: string) {
+  return schedule.assignments.filter((assignment) => assignment.blockId === requirementId);
+}
+
+function buildWeekSections(range: GeneratedScheduleRange, requirements: StaffingRequirement[]) {
+  return range.weeks.map((week) => {
+    const sortedRequirements = buildSortedRequirements(requirements);
+    const dayCards = DAYS.map((day) => ({
+      day,
+      requirements: sortedRequirements
+        .filter((requirement) => requirement.day === day)
+        .map((requirement) => {
+          const assignments = buildAssignmentsForRequirement(week.schedule, requirement.id);
+          return {
+            requirement,
+            assignments,
+          };
+        }),
+      dayAssignments: week.schedule.assignments.filter((assignment) => assignment.day === day),
+      dayCost: week.schedule.dayCost[day] ?? 0,
+    }));
+
+    return {
+      week,
+      dayCards,
+    };
+  });
 }
 
 export default function Page() {
@@ -112,13 +225,15 @@ export default function Page() {
   const [activeSection, setActiveSection] = useState<Section>('dashboard');
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('');
   const [employeeDraft, setEmployeeDraft] = useState<Employee>(createEmployeeDraft());
-  const [weekOffset, setWeekOffset] = useState(0);
+  const [period, setPeriod] = useState(createPeriodDraft());
   const [storageStatus, setStorageStatus] = useState<'loading' | 'saved'>('loading');
   const [driveStatus, setDriveStatus] = useState<'idle' | 'connecting' | 'backing up' | 'restoring' | 'ready' | 'error'>('idle');
   const [driveMessage, setDriveMessage] = useState('Drive backup is optional.');
   const [driveAccessToken, setDriveAccessToken] = useState<string | null>(null);
   const [driveBackupFileId, setDriveBackupFileId] = useState<string | null>(null);
   const [driveBackupAt, setDriveBackupAt] = useState<string | null>(null);
+  const [showDriveMenu, setShowDriveMenu] = useState(false);
+  const [lastGeneratedAt, setLastGeneratedAt] = useState<string | null>(null);
   const [rangeDraft, setRangeDraft] = useState({ day: 'mon' as DayKey, start: '09:00', end: '17:00' });
   const [weeklyUnavailabilityDraft, setWeeklyUnavailabilityDraft] = useState({ day: 'mon' as DayKey, start: '12:00', end: '13:00' });
   const [exceptionDraft, setExceptionDraft] = useState({
@@ -137,6 +252,7 @@ export default function Page() {
     role: '',
     notes: '',
   });
+
   useEffect(() => {
     setState(getInitialState());
     setLoaded(true);
@@ -152,10 +268,6 @@ export default function Page() {
       setEmployeeDraft(state.employees[0]);
     }
   }, [selectedEmployeeId, state.employees]);
-
-  const weekStart = useMemo(() => loadWeekStart(weekOffset), [weekOffset]);
-  const validationMessages = useMemo(() => validateState(state), [state]);
-  const schedule = useMemo(() => generateSchedule(state, weekStart), [state, weekStart]);
 
   useEffect(() => {
     if (!state.employees.find((employee) => employee.id === selectedEmployeeId)) return;
@@ -194,14 +306,33 @@ export default function Page() {
 
   const selectedEmployee = state.employees.find((employee) => employee.id === selectedEmployeeId) ?? state.employees[0];
   const selectedEmployeeAvailability = selectedEmployee ? state.availability[selectedEmployee.id] ?? createEmptyAvailability() : createEmptyAvailability();
+  const validationMessages = useMemo(() => validateState(state), [state]);
+  const selectedPeriod = useMemo(() => resolvePeriod(period), [period]);
+  const generatedRange = useMemo(
+    () => generateScheduleRange(state, selectedPeriod.start, selectedPeriod.end),
+    [state, selectedPeriod.start, selectedPeriod.end],
+  );
+  const reviewedRange = useMemo(
+    () => reviewScheduleRange(generatedRange, state, state.scheduleOverrides),
+    [generatedRange, state, state.scheduleOverrides],
+  );
+  const feasibility = useMemo(
+    () => checkScheduleFeasibility(state, selectedPeriod.start, selectedPeriod.end),
+    [state, selectedPeriod.start, selectedPeriod.end],
+  );
+  const weekSections = useMemo(() => buildWeekSections(reviewedRange, state.staffingRequirements), [reviewedRange, state.staffingRequirements]);
+
   const activeCount = state.employees.filter((employee) => employee.active).length;
-  const weeklyHours = Object.values(schedule.employeeHours).reduce((sum, value) => sum + value, 0);
-  const underfilledCount = schedule.alerts.filter((alert) => alert.kind === 'understaffed').length;
-  const totalAlerts = validationMessages.length + schedule.alerts.length;
+  const activeEmployees = state.employees.filter((employee) => employee.active);
+  const totalAssignedHours = Object.values(reviewedRange.employeeHours).reduce((sum, value) => sum + value, 0);
+  const totalAlerts = validationMessages.length + reviewedRange.alerts.length;
+  const underfilledCount = reviewedRange.alerts.filter((alert) => alert.kind === 'understaffed').length;
 
   function persistNextState(nextState: AppState) {
+    const publishedAt = nextState.schedulePublishedAt !== state.schedulePublishedAt ? nextState.schedulePublishedAt : null;
     setState({
       ...nextState,
+      schedulePublishedAt: publishedAt,
       updatedAt: new Date().toISOString(),
     });
   }
@@ -219,6 +350,7 @@ export default function Page() {
       },
     });
     setSelectedEmployeeId(employee.id);
+    setActiveSection('employees');
   }
 
   function deleteEmployee(employeeId: string) {
@@ -232,6 +364,9 @@ export default function Page() {
     const replacement = state.employees.find((employee) => employee.id !== employeeId);
     if (replacement) {
       setSelectedEmployeeId(replacement.id);
+    } else {
+      setSelectedEmployeeId('');
+      setEmployeeDraft(createEmployeeDraft());
     }
   }
 
@@ -370,7 +505,9 @@ export default function Page() {
     window.localStorage.setItem(BACKUP_KEY, JSON.stringify(fresh));
     setSelectedEmployeeId(fresh.employees[0]?.id ?? '');
     setEmployeeDraft(fresh.employees[0] ?? createEmployeeDraft());
-    setWeekOffset(0);
+    setPeriod(createPeriodDraft());
+    setActiveSection('dashboard');
+    setLastGeneratedAt(null);
   }
 
   async function connectDrive() {
@@ -424,17 +561,14 @@ export default function Page() {
       const token = await ensureDriveToken();
       if (!token) return;
 
-      const latest = driveBackupFileId
-        ? { id: driveBackupFileId }
-        : await findLatestDriveBackup(token);
-
+      const latest = driveBackupFileId ? { id: driveBackupFileId } : await findLatestDriveBackup(token);
       if (!latest) {
         throw new Error('No Drive backup was found.');
       }
 
       const restored = await downloadDriveBackup(token, latest.id);
       persistNextState({
-        ...restored,
+        ...normalizeState(restored),
         updatedAt: new Date().toISOString(),
       });
       setSelectedEmployeeId(restored.employees[0]?.id ?? '');
@@ -443,6 +577,7 @@ export default function Page() {
       setDriveBackupAt(new Date().toISOString());
       setDriveStatus('ready');
       setDriveMessage('Restored the latest backup from Google Drive.');
+      setActiveSection('dashboard');
     } catch (error) {
       setDriveStatus('error');
       setDriveMessage(error instanceof Error ? error.message : 'Drive restore failed.');
@@ -462,7 +597,7 @@ export default function Page() {
   async function importState(file: File | undefined) {
     if (!file) return;
     const text = await file.text();
-    const parsed = JSON.parse(text) as AppState;
+    const parsed = normalizeState(JSON.parse(text) as Partial<AppState>);
     if (!parsed?.employees || !parsed?.businessHours || !parsed?.staffingRequirements) {
       throw new Error('Invalid file');
     }
@@ -472,48 +607,77 @@ export default function Page() {
     });
     setSelectedEmployeeId(parsed.employees[0]?.id ?? '');
     setEmployeeDraft(parsed.employees[0] ?? createEmployeeDraft());
+    setActiveSection('dashboard');
   }
 
-  const dayCostEntries = DAYS.map((day) => ({
-    day,
-    cost: schedule.dayCost[day] ?? 0,
-  }));
+  function refreshSchedule() {
+    setLastGeneratedAt(new Date().toISOString());
+  }
 
-  const assignmentsByDay = DAYS.map((day) => ({
-    day,
-    assignments: schedule.assignments
-      .filter((assignment) => assignment.day === day)
-      .sort((a, b) => (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0)),
-  }));
+  function setScheduleOverride(assignmentKey: string, value: string) {
+    const nextOverrides = { ...state.scheduleOverrides };
+    if (value === '__inherit__') {
+      delete nextOverrides[assignmentKey];
+    } else if (value === '__clear__') {
+      nextOverrides[assignmentKey] = null;
+    } else {
+      nextOverrides[assignmentKey] = value;
+    }
+    persistNextState({
+      ...state,
+      scheduleOverrides: nextOverrides,
+    });
+  }
+
+  function clearScheduleOverrides() {
+    persistNextState({
+      ...state,
+      scheduleOverrides: {},
+    });
+  }
+
+  function publishSchedule() {
+    const blockingAlerts = reviewedRange.alerts.filter((alert) => alert.kind !== 'hours');
+    if (blockingAlerts.length > 0) {
+      alert('Resolve the remaining conflicts and understaffing before publishing.');
+      return;
+    }
+    persistNextState({
+      ...state,
+      schedulePublishedAt: new Date().toISOString(),
+    });
+  }
+
+  const activePeriodLabel = period.mode === 'custom' ? selectedPeriod.label : selectedPeriod.label;
 
   const employeeRows = state.employees.map((employee) => ({
     ...employee,
-    hours: schedule.employeeHours[employee.id] ?? 0,
-    cost: schedule.employeeCost[employee.id] ?? 0,
+    hours: reviewedRange.employeeHours[employee.id] ?? 0,
+    cost: reviewedRange.employeeCost[employee.id] ?? 0,
   }));
+
+  const availableExceptionRows = selectedEmployeeAvailability.exceptions.filter((entry) => isDateInPeriod(entry.date, selectedPeriod.start, selectedPeriod.end));
+  const scheduleWarnings = [...validationMessages, ...reviewedRange.alerts.map((warning) => warning.message)];
 
   return (
     <main className="shell">
       <header className="topbar">
-        <div>
+        <div className="topbar-copy">
           <p className="eyebrow">Staffing Board</p>
           <h1>iPad-ready scheduling for small teams</h1>
           <p className="lede">
-            Manage availability, hours, staffing rules, and projected labor cost from a clean touch-first workspace.
+            Keep employee data, availability, staffing rules, schedules, and backups in one simple tablet-friendly workspace.
           </p>
           <p className="sync-line">
             Storage: <strong>{storageStatus}</strong> and saved in this device's browser
           </p>
         </div>
         <div className="topbar-actions">
-          <button className="ghost-button" onClick={() => setWeekOffset((value) => value - 1)}>
-            Previous week
+          <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
+            Google Drive
           </button>
-          <button className="ghost-button" onClick={() => setWeekOffset((value) => value + 1)}>
-            Next week
-          </button>
-          <button className="ghost-button" onClick={exportState}>
-            Export data
+          <button className="ghost-button" onClick={clearAllData}>
+            Reset to seed
           </button>
           <label className="ghost-button import-button">
             Import data
@@ -531,47 +695,41 @@ export default function Page() {
               }}
             />
           </label>
-          <button className="primary-button" onClick={clearAllData}>
-            Reset to seed data
-          </button>
         </div>
       </header>
 
       <section className="summary-strip">
         <Metric label="Active employees" value={`${activeCount}`} />
-        <Metric label="Projected weekly cost" value={formatCurrency(schedule.totalCost)} />
-        <Metric label="Assigned hours" value={`${weeklyHours.toFixed(1)} hrs`} />
+        <Metric label="Selected period cost" value={formatCurrency(reviewedRange.totalCost)} />
+        <Metric label="Assigned hours" value={`${totalAssignedHours.toFixed(1)} hrs`} />
         <Metric label="Alerts" value={`${totalAlerts}`} accent={totalAlerts > 0 ? 'warn' : 'good'} />
       </section>
 
-      <section className="backup-strip">
-        <div>
-          <p className="eyebrow">Backup</p>
-          <h2>Google Drive recovery copy</h2>
-          <p className="lede">
-            Local storage keeps the live working copy. Google Drive gives you a separate backup that the owner can restore later on the same or a different device.
-          </p>
-          {!GOOGLE_CLIENT_ID && (
-            <p className="sync-line">
-              Google Drive backup is not configured yet. Add <strong>NEXT_PUBLIC_GOOGLE_CLIENT_ID</strong> in your deployment settings to enable it.
-            </p>
-          )}
-          <p className="sync-line">
-            Status: <strong>{driveStatus}</strong> {driveBackupAt ? `• Last backup ${new Date(driveBackupAt).toLocaleString()}` : ''}
-          </p>
-          <p className="sync-line">{driveMessage}</p>
-        </div>
-        <div className="backup-actions">
-          <button className="ghost-button" onClick={connectDrive} disabled={!GOOGLE_CLIENT_ID}>
-            {driveAccessToken ? 'Reconnect Drive' : 'Connect Google Drive'}
-          </button>
-          <button className="primary-button" onClick={backUpToDrive} disabled={!GOOGLE_CLIENT_ID}>
-            Back up now
-          </button>
-          <button className="ghost-button" onClick={restoreFromDrive} disabled={!GOOGLE_CLIENT_ID}>
-            Restore latest
-          </button>
-        </div>
+      <section className="action-launcher">
+        <ActionTile
+          title="Employees"
+          description="Edit names, pay, priorities, and hour limits."
+          buttonLabel="Open employees"
+          onClick={() => setActiveSection('employees')}
+        />
+        <ActionTile
+          title="Availability"
+          description="Set recurring availability and date exceptions for the selected period."
+          buttonLabel="Open availability"
+          onClick={() => setActiveSection('availability')}
+        />
+        <ActionTile
+          title="Schedules"
+          description="Define business hours, staffing blocks, and generate the calendar."
+          buttonLabel="Open schedules"
+          onClick={() => setActiveSection('schedules')}
+        />
+        <ActionTile
+          title="Google Drive"
+          description="Back up and restore the live browser copy from a Google account."
+          buttonLabel="Open Drive menu"
+          onClick={() => setShowDriveMenu(true)}
+        />
       </section>
 
       <nav className="section-nav" aria-label="Sections">
@@ -586,55 +744,94 @@ export default function Page() {
         ))}
       </nav>
 
+      {showDriveMenu && (
+        <div className="drive-overlay" role="presentation" onClick={() => setShowDriveMenu(false)}>
+          <aside className="drive-menu panel" role="dialog" aria-modal="true" aria-label="Google Drive menu" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Google Drive</p>
+                <h2>Backup and restore</h2>
+              </div>
+              <button className="ghost-button small" onClick={() => setShowDriveMenu(false)}>
+                Close
+              </button>
+            </div>
+            <p className="lede">
+              Use Drive as the recovery copy. The live working copy still stays in this iPad browser so the app remains fast and simple.
+            </p>
+            {!GOOGLE_CLIENT_ID && (
+              <p className="sync-line">
+                Google Drive backup is not configured yet. Add <strong>NEXT_PUBLIC_GOOGLE_CLIENT_ID</strong> in your deployment settings to enable it.
+              </p>
+            )}
+            <p className="sync-line">
+              Status: <strong>{driveStatus}</strong> {driveBackupAt ? `• Last backup ${new Date(driveBackupAt).toLocaleString()}` : ''}
+            </p>
+            <p className="sync-line">{driveMessage}</p>
+            <div className="backup-actions">
+              <button className="ghost-button" onClick={connectDrive} disabled={!GOOGLE_CLIENT_ID}>
+                {driveAccessToken ? 'Reconnect Drive' : 'Connect Google Drive'}
+              </button>
+              <button className="primary-button" onClick={backUpToDrive} disabled={!GOOGLE_CLIENT_ID}>
+                Back up now
+              </button>
+              <button className="ghost-button" onClick={restoreFromDrive} disabled={!GOOGLE_CLIENT_ID}>
+                Restore latest
+              </button>
+              <button className="ghost-button" onClick={exportState}>
+                Export JSON
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+
       {activeSection === 'dashboard' && (
-        <section className="panel-grid two-up">
+        <section className="panel-grid dashboard-grid">
           <article className="panel">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Week in view</p>
-                <h2>
-                  {weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} -{' '}
-                  {new Date(weekStart.getTime() + 6 * 86400000).toLocaleDateString('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                  })}
-                </h2>
+                <p className="eyebrow">Period</p>
+                <h2>{activePeriodLabel}</h2>
               </div>
-              <p className="muted">{validationMessages.length + schedule.alerts.length} total issues</p>
+              <button className="ghost-button" onClick={() => setActiveSection('schedules')}>
+                Review schedule
+              </button>
             </div>
-            <div className="stack">
-              <p>
-                This schedule is generated from your current staffing rules and availability. It prefers higher-priority employees for more hours while protecting min and max weekly hour limits.
-              </p>
-              <div className="inline-actions">
-                <button className="primary-button" onClick={() => setActiveSection('schedule')}>
-                  Review schedule
-                </button>
-                <button className="ghost-button" onClick={() => setActiveSection('alerts')}>
-                  View alerts
-                </button>
-              </div>
+            <p className="lede">
+              The current period is the one you will see in Availability and Schedules. Use the buttons below to jump straight to the next task.
+            </p>
+            <div className="mini-nav">
+              <button className="primary-button" onClick={() => setActiveSection('employees')}>
+                Employees
+              </button>
+              <button className="ghost-button" onClick={() => setActiveSection('availability')}>
+                Availability
+              </button>
+              <button className="ghost-button" onClick={() => setActiveSection('schedules')}>
+                Schedules
+              </button>
             </div>
           </article>
           <article className="panel">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Quick facts</p>
-                <h2>Current configuration</h2>
+                <p className="eyebrow">Current configuration</p>
+                <h2>Quick facts</h2>
               </div>
             </div>
             <ul className="key-list">
               <li>
-                <strong>{state.staffingRequirements.length}</strong> staffing blocks across the week
+                <strong>{state.staffingRequirements.length}</strong> staffing blocks across the period
               </li>
               <li>
-                <strong>{Object.values(schedule.dayCost).filter((value) => value > 0).length}</strong> days with scheduled labor cost
+                <strong>{Object.values(reviewedRange.employeeHours).filter((hours) => hours > 0).length}</strong> employees scheduled
               </li>
               <li>
                 <strong>{underfilledCount}</strong> understaffed periods detected
               </li>
               <li>
-                <strong>{Object.values(schedule.employeeHours).filter((hours) => hours > 0).length}</strong> employees scheduled this week
+                <strong>{formatCurrency(reviewedRange.totalCost)}</strong> projected period labor cost
               </li>
             </ul>
           </article>
@@ -647,13 +844,16 @@ export default function Page() {
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Employees</p>
-                <h2>Manage the team</h2>
+                <h2>Team list</h2>
               </div>
-              <button className="ghost-button" onClick={() => {
-                const draft = createEmployeeDraft();
-                setEmployeeDraft(draft);
-                setSelectedEmployeeId(draft.id);
-              }}>
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  const draft = createEmployeeDraft();
+                  setEmployeeDraft(draft);
+                  setSelectedEmployeeId(draft.id);
+                }}
+              >
                 Add employee
               </button>
             </div>
@@ -666,7 +866,9 @@ export default function Page() {
                 >
                   <span>
                     <strong>{employee.name}</strong>
-                    <small>{employee.role || 'No role set'}</small>
+                    <small>
+                      {employee.role || 'No role'} • {formatCurrency(employee.hourlyWage)}/hr
+                    </small>
                   </span>
                   <span className={employee.active ? 'status-pill good' : 'status-pill muted'}>
                     {employee.active ? 'Active' : 'Inactive'}
@@ -675,6 +877,7 @@ export default function Page() {
               ))}
             </div>
           </article>
+
           <article className="panel">
             <div className="panel-header">
               <div>
@@ -695,10 +898,10 @@ export default function Page() {
               <Field label="Priority">
                 <input type="number" min="1" max="5" value={employeeDraft.priorityLevel} onChange={(event) => updateSelectedEmployee({ priorityLevel: Number(event.target.value) })} />
               </Field>
-              <Field label="Min preferred hours">
+              <Field label="Min weekly hours">
                 <input type="number" min="0" step="0.5" value={employeeDraft.minPreferredWeeklyHours} onChange={(event) => updateSelectedEmployee({ minPreferredWeeklyHours: Number(event.target.value) })} />
               </Field>
-              <Field label="Max allowed hours">
+              <Field label="Max weekly hours">
                 <input type="number" min="0" step="0.5" value={employeeDraft.maxAllowedWeeklyHours} onChange={(event) => updateSelectedEmployee({ maxAllowedWeeklyHours: Number(event.target.value) })} />
               </Field>
               <Field label="Notes">
@@ -740,8 +943,15 @@ export default function Page() {
               </select>
             </div>
 
+            <PeriodSelector period={period} setPeriod={setPeriod} />
+
             <div className="subpanel">
-              <h3>Weekly availability</h3>
+              <div className="panel-header compact">
+                <div>
+                  <h3>Weekly availability</h3>
+                  <p className="muted">Recurring hours that repeat every week.</p>
+                </div>
+              </div>
               <div className="form-inline">
                 <select value={rangeDraft.day} onChange={(event) => setRangeDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
                   {DAYS.map((day) => (
@@ -759,14 +969,19 @@ export default function Page() {
               <RuleList
                 items={selectedEmployeeAvailability.weeklyAvailability.map((item, index) => ({
                   id: `${item.day}-${index}`,
-                  label: `${dayFullLabel(item.day)} ${item.ranges.map((range) => `${formatTime(parseTime(range.start) ?? 0)} - ${formatTime(parseTime(range.end) ?? 0)}`).join(', ')}`,
+                  label: `${dayFullLabel(item.day)} ${item.ranges.map((range) => formatRange(range.start, range.end)).join(', ')}`,
                 }))}
                 onDelete={(id) => removeAvailabilityRule('weeklyAvailability', id)}
               />
             </div>
 
             <div className="subpanel">
-              <h3>Weekly unavailability</h3>
+              <div className="panel-header compact">
+                <div>
+                  <h3>Weekly unavailability</h3>
+                  <p className="muted">Times that should never be scheduled.</p>
+                </div>
+              </div>
               <div className="form-inline">
                 <select value={weeklyUnavailabilityDraft.day} onChange={(event) => setWeeklyUnavailabilityDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
                   {DAYS.map((day) => (
@@ -784,7 +999,7 @@ export default function Page() {
               <RuleList
                 items={selectedEmployeeAvailability.weeklyUnavailability.map((item, index) => ({
                   id: `${item.day}-${index}`,
-                  label: `${dayFullLabel(item.day)} ${item.ranges.map((range) => `${formatTime(parseTime(range.start) ?? 0)} - ${formatTime(parseTime(range.end) ?? 0)}`).join(', ')}`,
+                  label: `${dayFullLabel(item.day)} ${item.ranges.map((range) => formatRange(range.start, range.end)).join(', ')}`,
                 }))}
                 onDelete={(id) => removeAvailabilityRule('weeklyUnavailability', id)}
               />
@@ -793,7 +1008,14 @@ export default function Page() {
 
           <article className="panel">
             <div className="subpanel">
-              <h3>One-time exceptions</h3>
+              <div className="panel-header compact">
+                <div>
+                  <h3>One-time exceptions</h3>
+                  <p className="muted">
+                    Add a date-specific change for the selected period: this is the easiest way to adjust one week without rewriting recurring rules.
+                  </p>
+                </div>
+              </div>
               <div className="form-grid narrow">
                 <Field label="Date">
                   <input type="date" value={exceptionDraft.date} onChange={(event) => setExceptionDraft((current) => ({ ...current, date: event.target.value }))} />
@@ -817,8 +1039,15 @@ export default function Page() {
               <button className="primary-button" onClick={addException}>
                 Add exception
               </button>
+              <div className="spacer" />
+              <div className="panel-header compact">
+                <div>
+                  <h3>Exceptions in this period</h3>
+                  <p className="muted">{selectedPeriod.label}</p>
+                </div>
+              </div>
               <RuleList
-                items={selectedEmployeeAvailability.exceptions.map((item) => ({
+                items={availableExceptionRows.map((item) => ({
                   id: item.id,
                   label: `${item.date} ${item.start} - ${item.end} ${item.type}${item.notes ? ` • ${item.notes}` : ''}`,
                 }))}
@@ -829,8 +1058,78 @@ export default function Page() {
         </section>
       )}
 
-      {activeSection === 'hours' && (
-        <section className="panel-grid two-up">
+      {activeSection === 'schedules' && (
+        <section className="panel-grid schedule-grid">
+          <article className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Schedules</p>
+                <h2>Selected period</h2>
+              </div>
+              <button className="primary-button" onClick={refreshSchedule}>
+                Generate schedule
+              </button>
+            </div>
+            <PeriodSelector period={period} setPeriod={setPeriod} />
+            <p className="lede">
+              Build the schedule from the selected period, then export the calendar to PDF for the owner or manager.
+            </p>
+            <div className="review-banner">
+              <div>
+                <p className="eyebrow">Review</p>
+                <strong>{state.schedulePublishedAt ? 'Published' : 'Draft review ready'}</strong>
+                <p className="muted">
+                  {state.schedulePublishedAt
+                    ? `Published ${new Date(state.schedulePublishedAt).toLocaleString()}`
+                    : 'Use the controls in the calendar to swap or clear shifts before publishing.'}
+                </p>
+              </div>
+              <div className="row-actions">
+                <button className="ghost-button" onClick={clearScheduleOverrides} disabled={!Object.keys(state.scheduleOverrides).length}>
+                  Clear overrides
+                </button>
+                <button className="primary-button" onClick={publishSchedule} disabled={reviewedRange.alerts.some((alert) => alert.kind !== 'hours')}>
+                  Publish reviewed schedule
+                </button>
+              </div>
+            </div>
+            <div className={feasibility.feasible ? 'feasibility-card good' : 'feasibility-card warn'}>
+              <div>
+                <p className="eyebrow">Preflight</p>
+                <strong>{feasibility.feasible ? 'Schedule is feasible' : 'Schedule needs attention'}</strong>
+                <p className="muted">
+                  Demand: {feasibility.totalRequiredHours.toFixed(1)} hrs • Capacity: {feasibility.estimatedCapacityHours.toFixed(1)} hrs
+                </p>
+              </div>
+              <span className="status-pill">{Math.round(feasibility.coverageRatio * 100)}% capacity</span>
+            </div>
+            {feasibility.issues.length > 0 && (
+              <ul className="alert-list">
+                {feasibility.issues.slice(0, 4).map((issue) => (
+                  <li key={`${issue.kind}-${issue.message}`}>
+                    <strong>{issue.message}</strong>
+                    {(issue.eligibleEmployees?.length || issue.requiredStaff || issue.eligibleStaff !== undefined) && (
+                      <p className="muted">
+                        {issue.requiredStaff !== undefined ? `Need ${issue.requiredStaff} employee(s)` : null}
+                        {issue.eligibleStaff !== undefined ? `${issue.requiredStaff !== undefined ? ' • ' : ''}${issue.eligibleStaff} eligible` : null}
+                        {issue.eligibleEmployees?.length ? `${issue.requiredStaff !== undefined || issue.eligibleStaff !== undefined ? ' • ' : ''}Eligible: ${issue.eligibleEmployees.join(', ')}` : ' • Eligible: none'}
+                      </p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="inline-actions">
+              <button className="ghost-button" onClick={() => window.print()}>
+                Export calendar PDF
+              </button>
+              <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
+                Google Drive
+              </button>
+            </div>
+            {lastGeneratedAt && <p className="sync-line">Last refreshed {new Date(lastGeneratedAt).toLocaleString()}</p>}
+          </article>
+
           <article className="panel">
             <div className="panel-header">
               <div>
@@ -852,8 +1151,6 @@ export default function Page() {
                 Set day hours
               </button>
             </div>
-          </article>
-          <article className="panel">
             <div className="stack">
               {DAYS.map((day) => {
                 const rule = state.businessHours.find((entry) => entry.day === day);
@@ -863,7 +1160,7 @@ export default function Page() {
                       <strong>{dayFullLabel(day)}</strong>
                       <p className="muted">
                         {rule?.ranges.length
-                          ? rule.ranges.map((range) => `${range.start} - ${range.end}`).join(', ')
+                          ? rule.ranges.map((range) => formatRange(range.start, range.end)).join(', ')
                           : 'Closed'}
                       </p>
                     </div>
@@ -879,11 +1176,7 @@ export default function Page() {
               })}
             </div>
           </article>
-        </section>
-      )}
 
-      {activeSection === 'requirements' && (
-        <section className="panel-grid two-up">
           <article className="panel">
             <div className="panel-header">
               <div>
@@ -920,15 +1213,14 @@ export default function Page() {
             <button className="primary-button" onClick={addRequirement}>
               Add staffing block
             </button>
-          </article>
-          <article className="panel">
+            <div className="spacer" />
             <div className="scroll-list">
-              {state.staffingRequirements.map((requirement) => (
+              {buildSortedRequirements(state.staffingRequirements).map((requirement) => (
                 <div key={requirement.id} className="requirement-row">
                   <div>
                     <strong>{dayFullLabel(requirement.day)}</strong>
                     <p className="muted">
-                      {requirement.start} - {requirement.end} • {requirement.requiredStaff} staff
+                      {formatRange(requirement.start, requirement.end)} • {requirement.requiredStaff} staff
                     </p>
                     <p className="muted">{requirement.role || 'General coverage'}</p>
                   </div>
@@ -939,74 +1231,129 @@ export default function Page() {
               ))}
             </div>
           </article>
-        </section>
-      )}
 
-      {activeSection === 'schedule' && (
-        <section className="panel-grid">
-          <article className="panel">
+          <article className="panel printable-area">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Weekly schedule</p>
-                <h2>Generated coverage</h2>
+                <p className="eyebrow">Calendar</p>
+                <h2>Weekly coverage view</h2>
               </div>
-              <p className="muted">Auto-generated from the current rules and availability</p>
+              <span className="muted">{selectedPeriod.label}</span>
             </div>
-            <div className="day-grid">
-              {assignmentsByDay.map(({ day, assignments }) => (
-                <div key={day} className="day-card">
-                  <div className="day-card-header">
-                    <strong>{dayFullLabel(day)}</strong>
-                    <span className="muted">
-                      {assignments.length} assigned • {schedule.dayCost[day] ? formatCurrency(schedule.dayCost[day]) : '$0'}
-                    </span>
+            <div className="print-summary">
+              <div>
+                <strong>{formatCurrency(reviewedRange.totalCost)}</strong>
+                <p className="muted">Projected labor cost for the selected period</p>
+              </div>
+              <div>
+                <strong>{totalAlerts}</strong>
+                <p className="muted">Validation and coverage issues</p>
+              </div>
+            </div>
+            <div className="calendar-stack">
+              {weekSections.map(({ week, dayCards }) => (
+                <section key={week.weekStart.toISOString()} className="week-card">
+                  <div className="panel-header compact">
+                    <div>
+                      <h3>{formatWeekLabel(week.weekStart, week.weekEnd)}</h3>
+                      <p className="muted">Tap into any day to see every assigned shift and employee.</p>
+                    </div>
+                    <span className="status-pill">{formatCurrency(week.schedule.totalCost)}</span>
                   </div>
-                  {assignments.length ? (
-                    assignments.map((assignment) => (
-                      <div key={assignment.id} className="shift-row">
-                        <div>
-                          <strong>
-                            {assignment.start} - {assignment.end}
-                          </strong>
-                          <p className="muted">
-                            {assignment.employeeName} • {assignment.role || 'No role'}
-                          </p>
+                  <div className="calendar-grid">
+                    {dayCards.map(({ day, requirements, dayAssignments, dayCost }) => (
+                      <div key={day} className="day-card">
+                        <div className="day-card-header">
+                          <strong>{dayLabel(day)}</strong>
+                          <span className="muted">
+                            {dayAssignments.length} shifts • {formatCurrency(dayCost)}
+                          </span>
                         </div>
-                        <span className="status-pill">
-                          {formatCurrency(assignment.cost)}
-                        </span>
+                        {requirements.length ? (
+                          <div className="calendar-blocks">
+                            {requirements.map(({ requirement, assignments }) => {
+                              const missing = Math.max(0, requirement.requiredStaff - assignments.length);
+                              const blockDate = assignments[0]?.date ?? isoDateForWeekDay(week.weekStart, requirement.day);
+                              const assignmentsBySlot = new Map(assignments.map((assignment) => [assignment.slotIndex, assignment]));
+                              return (
+                                <div key={requirement.id} className="calendar-block">
+                                  <div className="calendar-block-top">
+                                    <strong>{formatRange(requirement.start, requirement.end)}</strong>
+                                    <span className="status-pill">{requirement.requiredStaff} needed</span>
+                                  </div>
+                                  <p className="muted">{requirement.role || 'General coverage'}</p>
+                                  <div className="assigned-line">
+                                    {assignments.length ? (
+                                      assignments.map((assignment) => (
+                                        <span key={assignment.id} className="assigned-pill">
+                                          {assignment.employeeName}
+                                        </span>
+                                      ))
+                                    ) : (
+                                      <span className="muted">No one assigned yet</span>
+                                    )}
+                                  </div>
+                                  <div className="review-slots">
+                                    {Array.from({ length: requirement.requiredStaff }, (_, slotIndex) => {
+                                      const assignment = assignmentsBySlot.get(slotIndex);
+                                      const overrideKey = scheduleAssignmentKey({
+                                        date: blockDate,
+                                        blockId: requirement.id,
+                                        slotIndex,
+                                      });
+                                      const overrideValue = Object.prototype.hasOwnProperty.call(state.scheduleOverrides, overrideKey)
+                                        ? state.scheduleOverrides[overrideKey]
+                                        : undefined;
+                                      const currentValue = overrideValue === null ? '__clear__' : overrideValue ?? assignment?.employeeId ?? '__clear__';
+                                      return (
+                                        <label key={`${requirement.id}-${slotIndex}`} className="slot-row">
+                                          <span>Slot {slotIndex + 1}</span>
+                                          <select value={currentValue} onChange={(event) => setScheduleOverride(overrideKey, event.target.value)}>
+                                            <option value="__inherit__">Keep generated</option>
+                                            <option value="__clear__">Unassigned</option>
+                                            {activeEmployees.map((employee) => (
+                                              <option key={employee.id} value={employee.id}>
+                                                {employee.name}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                  {missing > 0 && <p className="warn-line">Unfilled: {missing}</p>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="muted">No staffing blocks set for this day.</p>
+                        )}
                       </div>
-                    ))
-                  ) : (
-                    <p className="muted">No assignments created for this day.</p>
-                  )}
-                </div>
+                    ))}
+                  </div>
+                </section>
               ))}
             </div>
           </article>
-        </section>
-      )}
 
-      {activeSection === 'costs' && (
-        <section className="panel-grid two-up">
           <article className="panel">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Cost summary</p>
-                <h2>Weekly labor spend</h2>
+                <h2>Labor spend</h2>
               </div>
-              <strong className="cost-large">{formatCurrency(schedule.totalCost)}</strong>
+              <strong className="cost-large">{formatCurrency(reviewedRange.totalCost)}</strong>
             </div>
             <div className="stack">
-              {dayCostEntries.map(({ day, cost }) => (
-                <div key={day} className="day-row">
-                  <strong>{dayFullLabel(day)}</strong>
-                  <span>{formatCurrency(cost)}</span>
+              {reviewedRange.weeks.map((week) => (
+                <div key={week.weekStart.toISOString()} className="day-row">
+                  <strong>{formatWeekLabel(week.weekStart, week.weekEnd)}</strong>
+                  <span>{formatCurrency(week.schedule.totalCost)}</span>
                 </div>
               ))}
             </div>
-          </article>
-          <article className="panel">
+            <div className="spacer" />
             <div className="scroll-list">
               {employeeRows.map((employee) => (
                 <div key={employee.id} className="employee-cost-row">
@@ -1024,38 +1371,19 @@ export default function Page() {
               ))}
             </div>
           </article>
-        </section>
-      )}
 
-      {activeSection === 'alerts' && (
-        <section className="panel-grid two-up">
           <article className="panel">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Alerts</p>
-                <h2>Validation warnings</h2>
+                <h2>Validation and conflicts</h2>
               </div>
             </div>
             <ul className="alert-list">
-              {validationMessages.length ? (
-                validationMessages.map((warning) => <li key={warning}>{warning}</li>)
+              {scheduleWarnings.length ? (
+                scheduleWarnings.map((warning) => <li key={warning}>{warning}</li>)
               ) : (
                 <li>No configuration validation issues.</li>
-              )}
-            </ul>
-          </article>
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Conflicts</p>
-                <h2>Schedule flags</h2>
-              </div>
-            </div>
-            <ul className="alert-list">
-              {schedule.alerts.length ? (
-                schedule.alerts.map((warning) => <li key={warning.id}>{warning.message}</li>)
-              ) : (
-                <li>No schedule conflicts. Coverage is currently stable.</li>
               )}
             </ul>
           </article>
@@ -1082,12 +1410,36 @@ function Metric({
   );
 }
 
+function ActionTile({
+  title,
+  description,
+  buttonLabel,
+  onClick,
+}: {
+  title: string;
+  description: string;
+  buttonLabel: string;
+  onClick: () => void;
+}) {
+  return (
+    <article className="action-tile">
+      <div>
+        <p className="eyebrow">{title}</p>
+        <p className="action-copy">{description}</p>
+      </div>
+      <button className="primary-button" onClick={onClick}>
+        {buttonLabel}
+      </button>
+    </article>
+  );
+}
+
 function Field({
   label,
   children,
 }: {
   label: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <label className="field">
@@ -1118,6 +1470,45 @@ function RuleList({
           </button>
         </div>
       ))}
+    </div>
+  );
+}
+
+function PeriodSelector({
+  period,
+  setPeriod,
+}: {
+  period: { mode: PeriodMode; customStart: string; customEnd: string };
+  setPeriod: Dispatch<SetStateAction<{ mode: PeriodMode; customStart: string; customEnd: string }>>;
+}) {
+  return (
+    <div className="period-panel">
+      <div className="period-buttons">
+        {[
+          ['thisWeek', 'This week'],
+          ['nextWeek', 'Next week'],
+          ['twoWeeks', 'Two weeks'],
+          ['custom', 'Custom'],
+        ].map(([mode, label]) => (
+          <button
+            key={mode}
+            className={period.mode === mode ? 'section-chip active' : 'section-chip'}
+            onClick={() => setPeriod((current) => ({ ...current, mode: mode as PeriodMode }))}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {period.mode === 'custom' && (
+        <div className="form-inline">
+          <Field label="Start">
+            <input type="date" value={period.customStart} onChange={(event) => setPeriod((current) => ({ ...current, customStart: event.target.value }))} />
+          </Field>
+          <Field label="End">
+            <input type="date" value={period.customEnd} onChange={(event) => setPeriod((current) => ({ ...current, customEnd: event.target.value }))} />
+          </Field>
+        </div>
+      )}
     </div>
   );
 }

@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test:schedule": "tsc -p tsconfig.test.json && node --test .test-dist/tests/staffing.test.js",
+    "test": "npm run test:schedule"
   },
   "dependencies": {
     "next": "^15.3.0",

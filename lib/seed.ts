@@ -195,6 +195,8 @@ export function createSeedState(): AppState {
     availability,
     businessHours,
     staffingRequirements,
+    scheduleOverrides: {},
+    schedulePublishedAt: null,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -213,6 +215,8 @@ export function createEmptyState(): AppState {
     availability: {},
     businessHours: DAYS.map((day) => ({ day, ranges: [] })),
     staffingRequirements: [],
+    scheduleOverrides: {},
+    schedulePublishedAt: null,
     updatedAt: new Date().toISOString(),
   };
 }

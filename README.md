@@ -10,6 +10,8 @@ Tablet-friendly staffing and scheduling for small businesses with fewer than 20 
 - Generate a weekly schedule using a simple rule-based engine
 - Flag understaffed periods, invalid configuration, and hour shortfalls
 - Show projected labor cost by shift, day, employee, and week
+- Export the schedule calendar to PDF from the schedule screen
+- Keep Google Drive backup and restore actions in a compact menu instead of a large on-page panel
 - Store state locally in the browser and support JSON import/export for moving setup between devices
 
 ## Why this stack
@@ -130,7 +132,7 @@ To enable it:
 1. Create a Google OAuth client for a web app
 2. Add your authorized deployment domain and local dev origin in Google Cloud
 3. Set `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in your deployment environment
-4. Open the app and use the `Connect Google Drive` and `Back up now` buttons
+4. Open the app and use the `Google Drive` menu, then `Connect Google Drive` and `Back up now`
 
 Important:
 
@@ -144,6 +146,7 @@ Important:
 - The app keeps a browser cache in `localStorage`
 - The app also stores an automatic backup copy in browser storage
 - The app also lets you export and import the current state as JSON
+- The schedule screen includes a calendar-style view and an `Export calendar PDF` action that uses the browser print dialog
 - For the simplest free use case, give the business owner one hosted URL and let them install the site to the iPad Home Screen from Safari
 - Ordinary app code updates should not wipe the saved browser data, but the export/import option is there as a manual recovery path
 - If Google Drive backup is enabled, the user can keep a second recovery copy in Drive
