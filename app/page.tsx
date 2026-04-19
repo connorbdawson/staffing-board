@@ -35,15 +35,18 @@ import {
 } from '../lib/google-drive';
 import { withBasePath } from '../lib/base-path';
 
-type Section = 'dashboard' | 'employees' | 'availability' | 'schedules';
+type Section = 'home' | 'dashboard' | 'employees' | 'availability' | 'schedules';
 type PeriodMode = 'thisWeek' | 'nextWeek' | 'twoWeeks' | 'custom';
 
 const SECTION_LABELS: Record<Section, string> = {
+  home: 'Home',
   dashboard: 'Dashboard',
   employees: 'Employees',
   availability: 'Availability',
   schedules: 'Schedules',
 };
+
+const WORKSPACE_SECTIONS: Section[] = ['home', 'employees', 'availability', 'schedules', 'dashboard'];
 
 const STORAGE_KEY = 'staffing-board-state-v1';
 const BACKUP_KEY = 'staffing-board-state-backup-v1';
@@ -175,6 +178,34 @@ function formatWeekLabel(start: Date, end: Date) {
   })}`;
 }
 
+function formatDayDate(date: Date) {
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+function formatCompactDayDate(date: Date) {
+  return date.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function formatDateInputLabel(value: string) {
+  const date = new Date(`${value}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return formatDayDate(date);
+}
+
+function sectionFromHash() {
+  if (typeof window === 'undefined') return 'home' as Section;
+  const hash = window.location.hash.replace('#', '') as Section;
+  return WORKSPACE_SECTIONS.includes(hash) ? hash : 'home';
+}
+
 function isDateInPeriod(date: string, start: Date, end: Date) {
   const value = date.slice(0, 10);
   const startValue = start.toISOString().slice(0, 10);
@@ -222,7 +253,7 @@ function buildWeekSections(range: GeneratedScheduleRange, requirements: Staffing
 export default function Page() {
   const [state, setState] = useState<AppState>(createSeedState());
   const [loaded, setLoaded] = useState(false);
-  const [activeSection, setActiveSection] = useState<Section>('dashboard');
+  const [activeSection, setActiveSection] = useState<Section>('home');
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('');
   const [employeeDraft, setEmployeeDraft] = useState<Employee>(createEmployeeDraft());
   const [period, setPeriod] = useState(createPeriodDraft());
@@ -255,11 +286,22 @@ export default function Page() {
 
   useEffect(() => {
     setState(getInitialState());
+    setActiveSection(sectionFromHash());
     setLoaded(true);
     const savedFileId = window.localStorage.getItem(DRIVE_BACKUP_ID_KEY);
     const savedBackupAt = window.localStorage.getItem(DRIVE_BACKUP_AT_KEY);
     if (savedFileId) setDriveBackupFileId(savedFileId);
     if (savedBackupAt) setDriveBackupAt(savedBackupAt);
+  }, []);
+
+  useEffect(() => {
+    const handleHashChange = () => setActiveSection(sectionFromHash());
+    window.addEventListener('hashchange', handleHashChange);
+    window.addEventListener('popstate', handleHashChange);
+    return () => {
+      window.removeEventListener('hashchange', handleHashChange);
+      window.removeEventListener('popstate', handleHashChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -350,7 +392,7 @@ export default function Page() {
       },
     });
     setSelectedEmployeeId(employee.id);
-    setActiveSection('employees');
+    goToSection('employees');
   }
 
   function deleteEmployee(employeeId: string) {
@@ -506,7 +548,7 @@ export default function Page() {
     setSelectedEmployeeId(fresh.employees[0]?.id ?? '');
     setEmployeeDraft(fresh.employees[0] ?? createEmployeeDraft());
     setPeriod(createPeriodDraft());
-    setActiveSection('dashboard');
+    goToSection('home');
     setLastGeneratedAt(null);
   }
 
@@ -577,7 +619,7 @@ export default function Page() {
       setDriveBackupAt(new Date().toISOString());
       setDriveStatus('ready');
       setDriveMessage('Restored the latest backup from Google Drive.');
-      setActiveSection('dashboard');
+      goToSection('home');
     } catch (error) {
       setDriveStatus('error');
       setDriveMessage(error instanceof Error ? error.message : 'Drive restore failed.');
@@ -607,7 +649,14 @@ export default function Page() {
     });
     setSelectedEmployeeId(parsed.employees[0]?.id ?? '');
     setEmployeeDraft(parsed.employees[0] ?? createEmployeeDraft());
-    setActiveSection('dashboard');
+    goToSection('home');
+  }
+
+  function goToSection(section: Section) {
+    setActiveSection(section);
+    if (typeof window !== 'undefined') {
+      window.history.pushState(null, '', `${window.location.pathname}${window.location.search}#${section}`);
+    }
   }
 
   function refreshSchedule() {
@@ -664,10 +713,7 @@ export default function Page() {
       <header className="topbar">
         <div className="topbar-copy">
           <p className="eyebrow">Staffing Board</p>
-          <h1>iPad-ready scheduling for small teams</h1>
-          <p className="lede">
-            Keep employee data, availability, staffing rules, schedules, and backups in one simple tablet-friendly workspace.
-          </p>
+          <h1>Staffing Board</h1>
           <p className="sync-line">
             Storage: <strong>{storageStatus}</strong> and saved in this device's browser
           </p>
@@ -698,46 +744,12 @@ export default function Page() {
         </div>
       </header>
 
-      <section className="summary-strip">
-        <Metric label="Active employees" value={`${activeCount}`} />
-        <Metric label="Selected period cost" value={formatCurrency(reviewedRange.totalCost)} />
-        <Metric label="Assigned hours" value={`${totalAssignedHours.toFixed(1)} hrs`} />
-        <Metric label="Alerts" value={`${totalAlerts}`} accent={totalAlerts > 0 ? 'warn' : 'good'} />
-      </section>
-
-      <section className="action-launcher">
-        <ActionTile
-          title="Employees"
-          description="Edit names, pay, priorities, and hour limits."
-          buttonLabel="Open employees"
-          onClick={() => setActiveSection('employees')}
-        />
-        <ActionTile
-          title="Availability"
-          description="Set recurring availability and date exceptions for the selected period."
-          buttonLabel="Open availability"
-          onClick={() => setActiveSection('availability')}
-        />
-        <ActionTile
-          title="Schedules"
-          description="Define business hours, staffing blocks, and generate the calendar."
-          buttonLabel="Open schedules"
-          onClick={() => setActiveSection('schedules')}
-        />
-        <ActionTile
-          title="Google Drive"
-          description="Back up and restore the live browser copy from a Google account."
-          buttonLabel="Open Drive menu"
-          onClick={() => setShowDriveMenu(true)}
-        />
-      </section>
-
       <nav className="section-nav" aria-label="Sections">
-        {(Object.keys(SECTION_LABELS) as Section[]).map((section) => (
+        {WORKSPACE_SECTIONS.map((section) => (
           <button
             key={section}
             className={section === activeSection ? 'section-chip active' : 'section-chip'}
-            onClick={() => setActiveSection(section)}
+            onClick={() => goToSection(section)}
           >
             {SECTION_LABELS[section]}
           </button>
@@ -786,15 +798,60 @@ export default function Page() {
         </div>
       )}
 
+      {activeSection === 'home' && (
+        <section className="home-workspace">
+          <div className="workspace-heading">
+            <div>
+              <p className="eyebrow">Workspaces</p>
+              <h2>Choose what you need to work on</h2>
+            </div>
+            <span className="muted">{activePeriodLabel}</span>
+          </div>
+          <section className="action-launcher">
+            <ActionTile
+              title="Employees"
+              description="Names, roles, wages, hour limits, and priority."
+              buttonLabel="Open employees"
+              onClick={() => goToSection('employees')}
+            />
+            <ActionTile
+              title="Availability"
+              description="Weekly availability, unavailable blocks, and date exceptions."
+              buttonLabel="Open availability"
+              onClick={() => goToSection('availability')}
+            />
+            <ActionTile
+              title="Schedules"
+              description="Business hours, staffing needs, review, publish, and PDF export."
+              buttonLabel="Open schedules"
+              onClick={() => goToSection('schedules')}
+            />
+            <ActionTile
+              title="Dashboard"
+              description="Quick totals for cost, hours, alerts, and schedule health."
+              buttonLabel="Open dashboard"
+              onClick={() => goToSection('dashboard')}
+            />
+          </section>
+        </section>
+      )}
+
       {activeSection === 'dashboard' && (
-        <section className="panel-grid dashboard-grid">
+        <section className="dashboard-workspace">
+          <section className="summary-strip">
+            <Metric label="Active employees" value={`${activeCount}`} />
+            <Metric label="Selected period cost" value={formatCurrency(reviewedRange.totalCost)} />
+            <Metric label="Assigned hours" value={`${totalAssignedHours.toFixed(1)} hrs`} />
+            <Metric label="Alerts" value={`${totalAlerts}`} accent={totalAlerts > 0 ? 'warn' : 'good'} />
+          </section>
+          <section className="panel-grid dashboard-grid">
           <article className="panel">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Period</p>
                 <h2>{activePeriodLabel}</h2>
               </div>
-              <button className="ghost-button" onClick={() => setActiveSection('schedules')}>
+              <button className="ghost-button" onClick={() => goToSection('schedules')}>
                 Review schedule
               </button>
             </div>
@@ -802,13 +859,13 @@ export default function Page() {
               The current period is the one you will see in Availability and Schedules. Use the buttons below to jump straight to the next task.
             </p>
             <div className="mini-nav">
-              <button className="primary-button" onClick={() => setActiveSection('employees')}>
+              <button className="primary-button" onClick={() => goToSection('employees')}>
                 Employees
               </button>
-              <button className="ghost-button" onClick={() => setActiveSection('availability')}>
+              <button className="ghost-button" onClick={() => goToSection('availability')}>
                 Availability
               </button>
-              <button className="ghost-button" onClick={() => setActiveSection('schedules')}>
+              <button className="ghost-button" onClick={() => goToSection('schedules')}>
                 Schedules
               </button>
             </div>
@@ -835,6 +892,7 @@ export default function Page() {
               </li>
             </ul>
           </article>
+          </section>
         </section>
       )}
 
@@ -927,12 +985,12 @@ export default function Page() {
       )}
 
       {activeSection === 'availability' && selectedEmployee && (
-        <section className="panel-grid two-up">
-          <article className="panel">
-            <div className="panel-header">
+        <section className="panel-grid availability-grid">
+          <article className="panel workspace-intro">
+            <div className="workspace-heading">
               <div>
                 <p className="eyebrow">Availability</p>
-                <h2>{selectedEmployee.name}</h2>
+                <h2>Set who can work during the selected dates</h2>
               </div>
               <select value={selectedEmployee.id} onChange={(event) => setSelectedEmployeeId(event.target.value)}>
                 {state.employees.map((employee) => (
@@ -942,14 +1000,36 @@ export default function Page() {
                 ))}
               </select>
             </div>
-
             <PeriodSelector period={period} setPeriod={setPeriod} />
+            <WeekDateStrip start={selectedPeriod.start} end={selectedPeriod.end} />
+          </article>
+          <article className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Employee</p>
+                <h2>{selectedEmployee.name}</h2>
+              </div>
+            </div>
+            <div className="employee-selector-list">
+              {state.employees.map((employee) => (
+                <button
+                  key={employee.id}
+                  className={employee.id === selectedEmployee.id ? 'employee-row active' : 'employee-row'}
+                  onClick={() => setSelectedEmployeeId(employee.id)}
+                >
+                  <span>
+                    <strong>{employee.name}</strong>
+                    <small>{employee.role || 'Team member'}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
 
             <div className="subpanel">
               <div className="panel-header compact">
                 <div>
-                  <h3>Weekly availability</h3>
-                  <p className="muted">Recurring hours that repeat every week.</p>
+                  <h3>Add available hours</h3>
+                  <p className="muted">These hours repeat on the selected weekday.</p>
                 </div>
               </div>
               <div className="form-inline">
@@ -978,8 +1058,8 @@ export default function Page() {
             <div className="subpanel">
               <div className="panel-header compact">
                 <div>
-                  <h3>Weekly unavailability</h3>
-                  <p className="muted">Times that should never be scheduled.</p>
+                  <h3>Add unavailable hours</h3>
+                  <p className="muted">Use this for recurring blocks the employee cannot work.</p>
                 </div>
               </div>
               <div className="form-inline">
@@ -1010,9 +1090,9 @@ export default function Page() {
             <div className="subpanel">
               <div className="panel-header compact">
                 <div>
-                  <h3>One-time exceptions</h3>
+                  <h3>Date-specific exceptions</h3>
                   <p className="muted">
-                    Add a date-specific change for the selected period: this is the easiest way to adjust one week without rewriting recurring rules.
+                    Add a change for one exact date without rewriting recurring availability.
                   </p>
                 </div>
               </div>
@@ -1232,11 +1312,11 @@ export default function Page() {
             </div>
           </article>
 
-          <article className="panel printable-area">
+          <article className="panel review-area">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Calendar</p>
-                <h2>Weekly coverage view</h2>
+                <p className="eyebrow">Review</p>
+                <h2>Edit assignments before publishing</h2>
               </div>
               <span className="muted">{selectedPeriod.label}</span>
             </div>
@@ -1264,7 +1344,7 @@ export default function Page() {
                     {dayCards.map(({ day, requirements, dayAssignments, dayCost }) => (
                       <div key={day} className="day-card">
                         <div className="day-card-header">
-                          <strong>{dayLabel(day)}</strong>
+                          <strong>{formatDayDate(addDays(week.weekStart, DAYS.indexOf(day)))}</strong>
                           <span className="muted">
                             {dayAssignments.length} shifts • {formatCurrency(dayCost)}
                           </span>
@@ -1335,6 +1415,15 @@ export default function Page() {
                 </section>
               ))}
             </div>
+          </article>
+
+          <article className="panel printable-area">
+            <PrintableScheduleCalendar
+              employees={activeEmployees}
+              range={reviewedRange}
+              selectedPeriodLabel={selectedPeriod.label}
+              totalAlerts={totalAlerts}
+            />
           </article>
 
           <article className="panel">
@@ -1468,6 +1557,112 @@ function RuleList({
           <button className="ghost-button small" onClick={() => onDelete(item.id)}>
             Remove
           </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PrintableScheduleCalendar({
+  employees,
+  range,
+  selectedPeriodLabel,
+  totalAlerts,
+}: {
+  employees: Employee[];
+  range: GeneratedScheduleRange;
+  selectedPeriodLabel: string;
+  totalAlerts: number;
+}) {
+  return (
+    <div className="whiteboard-schedule">
+      <div className="whiteboard-header">
+        <div>
+          <p className="eyebrow">Export calendar</p>
+          <h2>Team schedule</h2>
+        </div>
+        <div className="whiteboard-meta">
+          <strong>{selectedPeriodLabel}</strong>
+          <span>{formatCurrency(range.totalCost)} labor cost</span>
+          <span>{totalAlerts} issue(s)</span>
+        </div>
+      </div>
+
+      <div className="whiteboard-stack">
+        {range.weeks.map((week) => (
+          <section key={week.weekStart.toISOString()} className="whiteboard-week">
+            <div className="whiteboard-week-title">
+              <strong>{formatWeekLabel(week.weekStart, week.weekEnd)}</strong>
+              <span>{formatCurrency(week.schedule.totalCost)}</span>
+            </div>
+            <div className="whiteboard-table-wrap">
+              <table className="whiteboard-table">
+                <thead>
+                  <tr>
+                    <th>Employee</th>
+                    {DAYS.map((day) => {
+                      const date = addDays(week.weekStart, DAYS.indexOf(day));
+                      return (
+                        <th key={day}>
+                          <span>{dayFullLabel(day)}</span>
+                          <strong>{date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}</strong>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {employees.map((employee) => (
+                    <tr key={employee.id}>
+                      <th scope="row">
+                        <strong>{employee.name}</strong>
+                        <span>{employee.role || 'Team member'}</span>
+                      </th>
+                      {DAYS.map((day) => {
+                        const assignments = week.schedule.assignments
+                          .filter((assignment) => assignment.employeeId === employee.id && assignment.day === day)
+                          .sort((a, b) => (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0));
+                        return (
+                          <td key={day}>
+                            {assignments.length ? (
+                              assignments.map((assignment) => (
+                                <div key={assignment.id} className="whiteboard-shift">
+                                  <strong>{formatRange(assignment.start, assignment.end)}</strong>
+                                  <span>{assignment.role || 'Shift'}</span>
+                                </div>
+                              ))
+                            ) : (
+                              <span className="whiteboard-empty">-</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WeekDateStrip({ start, end }: { start: Date; end: Date }) {
+  const days: Date[] = [];
+  let cursor = new Date(start);
+  while (cursor <= end) {
+    days.push(new Date(cursor));
+    cursor = addDays(cursor, 1);
+  }
+
+  return (
+    <div className="date-strip">
+      {days.map((date) => (
+        <div key={date.toISOString()} className="date-chip">
+          <span>{date.toLocaleDateString('en-US', { weekday: 'short' })}</span>
+          <strong>{date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</strong>
         </div>
       ))}
     </div>
