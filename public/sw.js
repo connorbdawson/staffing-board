@@ -1,5 +1,7 @@
-const CACHE_NAME = 'staffing-board-shell-v1';
-const APP_SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
+const CACHE_NAME = 'staffing-board-shell-v3';
+const SCOPE_PATH = new URL(self.registration.scope).pathname.replace(/\/$/, '');
+const withScope = (path) => `${SCOPE_PATH}${path}`;
+const APP_SHELL = [withScope('/'), withScope('/manifest.webmanifest'), withScope('/icon.svg')];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
