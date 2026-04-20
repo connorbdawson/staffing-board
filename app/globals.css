@@ -1056,7 +1056,7 @@ textarea {
 
 @media print {
   @page {
-    size: landscape;
+    size: letter landscape;
     margin: 0.35in;
   }
 
@@ -1106,6 +1106,7 @@ textarea {
 
   .printable-area {
     display: block !important;
+    width: 100%;
     padding: 0;
     border: none;
     background: #fff;
@@ -1117,62 +1118,67 @@ textarea {
 
   .month-export {
     min-width: 0;
-    overflow: visible;
+    width: 100%;
+    overflow: hidden;
     border: 3px solid #111;
     font-family: Georgia, 'Times New Roman', serif;
+    box-sizing: border-box;
+    break-inside: avoid;
+    page-break-inside: avoid;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
 
   .month-export-title {
-    padding: 5px 10px 3px;
+    padding: 0.08in 0.12in 0.05in;
   }
 
   .month-export-title h2 {
-    font-size: 18pt;
+    font-size: 16pt;
     letter-spacing: 0.16em;
   }
 
   .month-export-meta {
     grid-template-columns: 1fr auto 1fr;
     min-height: 0;
-    padding: 10px 24px;
-    font-size: 10pt;
+    padding: 0.08in 0.14in;
+    font-size: 9pt;
   }
 
   .month-export-meta > div strong {
-    min-width: 210px;
-    font-size: 12pt;
+    min-width: 2.2in;
+    padding: 0.03in 0.08in;
+    font-size: 10pt;
   }
 
   .month-day-name {
-    padding: 7px 5px;
-    font-size: 15pt;
+    padding: 0.06in 0.04in;
+    font-size: 11pt;
   }
 
   .month-cell {
-    min-height: 1.23in;
-    padding: 0.31in 0.07in 0.07in;
+    min-height: 0.92in;
+    padding: 0.23in 0.05in 0.05in;
     page-break-inside: avoid;
   }
 
   .month-date-number {
-    min-width: 0.28in;
-    height: 0.23in;
-    font-size: 10pt;
+    min-width: 0.3in;
+    height: 0.22in;
+    font-size: 9pt;
   }
 
   .month-cell-body {
-    min-height: 0.86in;
-    padding: 0.06in;
+    min-height: 0.62in;
+    padding: 0.05in;
     background: #f3e5cc !important;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
 
   .month-cell-body p {
-    font-size: 10pt;
-    line-height: 1.05;
+    font-size: 8.5pt;
+    line-height: 1.03;
   }
 
   .muted-month .month-cell-body,
@@ -1182,5 +1188,9 @@ textarea {
     background: #f3e5cc !important;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
+  }
+
+  .month-empty {
+    display: none;
   }
 }
