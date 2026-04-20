@@ -927,6 +927,15 @@ textarea {
   color: #555;
 }
 
+.month-placeholder {
+  background: #fff;
+}
+
+.month-placeholder .month-cell-body,
+.month-placeholder .month-date-number {
+  visibility: hidden;
+}
+
 .month-empty {
   visibility: hidden;
 }

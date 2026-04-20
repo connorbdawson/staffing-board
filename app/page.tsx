@@ -202,14 +202,6 @@ function formatMonthYear(date: Date) {
   });
 }
 
-function monthGridStart(date: Date) {
-  const result = new Date(date);
-  result.setHours(12, 0, 0, 0);
-  result.setDate(1);
-  result.setDate(result.getDate() - result.getDay());
-  return result;
-}
-
 function formatDayDate(date: Date) {
   return date.toLocaleDateString('en-US', {
     weekday: 'long',
@@ -1486,6 +1478,8 @@ export default function Page() {
           <article className="panel printable-area">
             <PrintableScheduleCalendar
               range={reviewedRange}
+              periodStart={selectedPeriod.start}
+              periodEnd={selectedPeriod.end}
               selectedPeriodLabel={selectedPeriod.label}
               totalAlerts={totalAlerts}
             />
@@ -1650,17 +1644,27 @@ function RuleList({
 
 function PrintableScheduleCalendar({
   range,
+  periodStart,
+  periodEnd,
   selectedPeriodLabel,
   totalAlerts,
 }: {
   range: GeneratedScheduleRange;
+  periodStart: Date;
+  periodEnd: Date;
   selectedPeriodLabel: string;
   totalAlerts: number;
 }) {
-  const firstWeek = range.weeks[0];
-  const calendarMonth = firstWeek?.weekStart ?? new Date();
-  const gridStart = monthGridStart(calendarMonth);
-  const calendarDays = Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+  const calendarStart = new Date(periodStart);
+  calendarStart.setHours(12, 0, 0, 0);
+  const calendarEnd = new Date(periodEnd);
+  calendarEnd.setHours(12, 0, 0, 0);
+  const leadingBlankDays = calendarStart.getDay();
+  const calendarDays: Date[] = [];
+  for (let cursor = new Date(calendarStart); cursor <= calendarEnd; cursor = addDays(cursor, 1)) {
+    calendarDays.push(new Date(cursor));
+  }
+  const trailingBlankDays = (7 - ((leadingBlankDays + calendarDays.length) % 7)) % 7;
   const assignmentsByDate = new Map<string, GeneratedScheduleRange['weeks'][number]['schedule']['assignments']>();
 
   range.weeks.forEach((week) => {
@@ -1679,7 +1683,7 @@ function PrintableScheduleCalendar({
       <div className="month-export-meta">
         <div>
           <span>Month</span>
-          <strong>{formatMonthYear(calendarMonth)}</strong>
+          <strong>{formatMonthYear(calendarStart)}</strong>
         </div>
         <strong>{selectedPeriodLabel}</strong>
         <span>{totalAlerts} issue(s)</span>
@@ -1690,13 +1694,15 @@ function PrintableScheduleCalendar({
             {day}
           </div>
         ))}
+        {Array.from({ length: leadingBlankDays }, (_, index) => (
+          <div key={`start-pad-${index}`} className="month-cell month-placeholder" aria-hidden="true" />
+        ))}
         {calendarDays.map((date) => {
           const isoDate = date.toISOString().slice(0, 10);
           const assignments = (assignmentsByDate.get(isoDate) ?? []).sort((a, b) => (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0));
-          const isCurrentMonth = date.getMonth() === calendarMonth.getMonth();
 
           return (
-            <div key={isoDate} className={isCurrentMonth ? 'month-cell' : 'month-cell muted-month'}>
+            <div key={isoDate} className="month-cell">
               <span className="month-date-number">{date.getDate()}</span>
               <div className="month-cell-body">
                 {assignments.length ? (
@@ -1712,6 +1718,9 @@ function PrintableScheduleCalendar({
             </div>
           );
         })}
+        {Array.from({ length: trailingBlankDays }, (_, index) => (
+          <div key={`end-pad-${index}`} className="month-cell month-placeholder" aria-hidden="true" />
+        ))}
       </div>
     </div>
   );
