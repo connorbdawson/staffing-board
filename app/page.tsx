@@ -1682,7 +1682,7 @@ function PrintableScheduleCalendar({
           <strong>{formatMonthYear(calendarMonth)}</strong>
         </div>
         <strong>{selectedPeriodLabel}</strong>
-        <span>{formatCurrency(range.totalCost)} labor cost | {totalAlerts} issue(s)</span>
+        <span>{totalAlerts} issue(s)</span>
       </div>
       <div className="month-calendar">
         {['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => (
