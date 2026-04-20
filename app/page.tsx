@@ -172,11 +172,42 @@ function formatRange(start: string, end: string) {
   return `${formatTime(parseTime(start) ?? 0)} - ${formatTime(parseTime(end) ?? 0)}`;
 }
 
+function formatCalendarTime(value: string) {
+  const minutes = parseTime(value);
+  if (minutes === null) return value;
+
+  const normalized = ((minutes % 1440) + 1440) % 1440;
+  const hour = Math.floor(normalized / 60);
+  const minute = normalized % 60;
+  const displayHour = hour % 12 === 0 ? 12 : hour % 12;
+
+  return minute === 0 ? String(displayHour) : `${displayHour}:${minute.toString().padStart(2, '0')}`;
+}
+
+function formatCalendarShiftLine(start: string, end: string, employeeName: string) {
+  return `${formatCalendarTime(start)}-${formatCalendarTime(end)} ${employeeName}`;
+}
+
 function formatWeekLabel(start: Date, end: Date) {
   return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
   })}`;
+}
+
+function formatMonthYear(date: Date) {
+  return date.toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
+function monthGridStart(date: Date) {
+  const result = new Date(date);
+  result.setHours(12, 0, 0, 0);
+  result.setDate(1);
+  result.setDate(result.getDate() - result.getDay());
+  return result;
 }
 
 function formatDayDate(date: Date) {
@@ -1454,7 +1485,6 @@ export default function Page() {
 
           <article className="panel printable-area">
             <PrintableScheduleCalendar
-              employees={activeEmployees}
               range={reviewedRange}
               selectedPeriodLabel={selectedPeriod.label}
               totalAlerts={totalAlerts}
@@ -1619,86 +1649,69 @@ function RuleList({
 }
 
 function PrintableScheduleCalendar({
-  employees,
   range,
   selectedPeriodLabel,
   totalAlerts,
 }: {
-  employees: Employee[];
   range: GeneratedScheduleRange;
   selectedPeriodLabel: string;
   totalAlerts: number;
 }) {
-  return (
-    <div className="whiteboard-schedule">
-      <div className="whiteboard-header">
-        <div>
-          <p className="eyebrow">Export calendar</p>
-          <h2>Team schedule</h2>
-        </div>
-        <div className="whiteboard-meta">
-          <strong>{selectedPeriodLabel}</strong>
-          <span>{formatCurrency(range.totalCost)} labor cost</span>
-          <span>{totalAlerts} issue(s)</span>
-        </div>
-      </div>
+  const firstWeek = range.weeks[0];
+  const calendarMonth = firstWeek?.weekStart ?? new Date();
+  const gridStart = monthGridStart(calendarMonth);
+  const calendarDays = Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+  const assignmentsByDate = new Map<string, GeneratedScheduleRange['weeks'][number]['schedule']['assignments']>();
 
-      <div className="whiteboard-stack">
-        {range.weeks.map((week) => (
-          <section key={week.weekStart.toISOString()} className="whiteboard-week">
-            <div className="whiteboard-week-title">
-              <strong>{formatWeekLabel(week.weekStart, week.weekEnd)}</strong>
-              <span>{formatCurrency(week.schedule.totalCost)}</span>
-            </div>
-            <div className="whiteboard-table-wrap">
-              <table className="whiteboard-table">
-                <thead>
-                  <tr>
-                    <th>Employee</th>
-                    {DAYS.map((day) => {
-                      const date = addDays(week.weekStart, DAYS.indexOf(day));
-                      return (
-                        <th key={day}>
-                          <span>{dayFullLabel(day)}</span>
-                          <strong>{date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}</strong>
-                        </th>
-                      );
-                    })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {employees.map((employee) => (
-                    <tr key={employee.id}>
-                      <th scope="row">
-                        <strong>{employee.name}</strong>
-                        <span>{employee.role || 'Team member'}</span>
-                      </th>
-                      {DAYS.map((day) => {
-                        const assignments = week.schedule.assignments
-                          .filter((assignment) => assignment.employeeId === employee.id && assignment.day === day)
-                          .sort((a, b) => (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0));
-                        return (
-                          <td key={day}>
-                            {assignments.length ? (
-                              assignments.map((assignment) => (
-                                <div key={assignment.id} className="whiteboard-shift">
-                                  <strong>{formatRange(assignment.start, assignment.end)}</strong>
-                                  <span>{assignment.role || 'Shift'}</span>
-                                </div>
-                              ))
-                            ) : (
-                              <span className="whiteboard-empty">-</span>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+  range.weeks.forEach((week) => {
+    week.schedule.assignments.forEach((assignment) => {
+      const current = assignmentsByDate.get(assignment.date) ?? [];
+      current.push(assignment);
+      assignmentsByDate.set(assignment.date, current);
+    });
+  });
+
+  return (
+    <div className="month-export">
+      <div className="month-export-title">
+        <h2>Month-at-a-Glance Schedule</h2>
+      </div>
+      <div className="month-export-meta">
+        <div>
+          <span>Month</span>
+          <strong>{formatMonthYear(calendarMonth)}</strong>
+        </div>
+        <strong>{selectedPeriodLabel}</strong>
+        <span>{formatCurrency(range.totalCost)} labor cost | {totalAlerts} issue(s)</span>
+      </div>
+      <div className="month-calendar">
+        {['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => (
+          <div key={day} className="month-day-name">
+            {day}
+          </div>
         ))}
+        {calendarDays.map((date) => {
+          const isoDate = date.toISOString().slice(0, 10);
+          const assignments = (assignmentsByDate.get(isoDate) ?? []).sort((a, b) => (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0));
+          const isCurrentMonth = date.getMonth() === calendarMonth.getMonth();
+
+          return (
+            <div key={isoDate} className={isCurrentMonth ? 'month-cell' : 'month-cell muted-month'}>
+              <span className="month-date-number">{date.getDate()}</span>
+              <div className="month-cell-body">
+                {assignments.length ? (
+                  assignments.map((assignment) => (
+                    <p key={assignment.id}>
+                      {formatCalendarShiftLine(assignment.start, assignment.end, assignment.employeeName)}
+                    </p>
+                  ))
+                ) : (
+                  <span className="month-empty">&nbsp;</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
