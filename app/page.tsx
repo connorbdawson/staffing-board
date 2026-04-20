@@ -145,8 +145,8 @@ function resolvePeriod(period: { mode: PeriodMode; customStart: string; customEn
     if (!Number.isNaN(startDate.getTime()) && !Number.isNaN(endDate.getTime())) {
       const safeStart = startDate <= endDate ? startDate : endDate;
       const safeEnd = startDate <= endDate ? endDate : startDate;
-      start = weekStartMonday(safeStart);
-      end = addDays(weekStartMonday(safeEnd), 6);
+      start = safeStart;
+      end = safeEnd;
     }
   }
 
