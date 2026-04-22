@@ -727,16 +727,30 @@ export default function Page() {
   const scheduleWarnings = [...validationMessages, ...reviewedRange.alerts.map((warning) => warning.message)];
 
   return (
-    <main className="shell">
-      <header className="topbar">
-        <div className="topbar-copy">
+    <main className="shell app-shell">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
           <p className="eyebrow">Staffing Board</p>
           <h1>Staffing Board</h1>
           <p className="sync-line">
-            Storage: <strong>{storageStatus}</strong> and saved in this device's browser
+            Storage: <strong>{storageStatus}</strong>
           </p>
         </div>
-        <div className="topbar-actions">
+
+        <nav className="sidebar-nav" aria-label="Sections">
+          {WORKSPACE_SECTIONS.map((section) => (
+            <a
+              key={section}
+              className={section === activeSection ? 'section-chip active' : 'section-chip'}
+              href={sectionHref(section)}
+              onClick={() => goToSection(section)}
+            >
+              {SECTION_LABELS[section]}
+            </a>
+          ))}
+        </nav>
+
+        <div className="sidebar-footer">
           <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
             Google Drive
           </button>
@@ -759,23 +773,34 @@ export default function Page() {
               }}
             />
           </label>
+          <p className="sync-line">{activePeriodLabel}</p>
         </div>
-      </header>
+      </aside>
 
-      <nav className="section-nav" aria-label="Sections">
-        {WORKSPACE_SECTIONS.map((section) => (
-          <a
-            key={section}
-            className={section === activeSection ? 'section-chip active' : 'section-chip'}
-            href={sectionHref(section)}
-            onClick={() => goToSection(section)}
-          >
-            {SECTION_LABELS[section]}
-          </a>
-        ))}
-      </nav>
+      <div className="app-main">
+        <header className="topbar">
+          <div className="topbar-copy">
+            <p className="eyebrow">Business workspace</p>
+            <h1>Staffing Board</h1>
+            <p className="sync-line">Tablet-first scheduling for small teams.</p>
+          </div>
+          <div className="topbar-actions">
+            <label className="topbar-search" aria-label="Search">
+              <input type="search" placeholder="Search employees, shifts, notes" />
+            </label>
+            <span className="topbar-badge" aria-label="Selected period">
+              {activePeriodLabel}
+            </span>
+            <button className="ghost-button" aria-label="Notifications">
+              Notifications
+            </button>
+            <button className="ghost-button" aria-label="User menu">
+              JD
+            </button>
+          </div>
+        </header>
 
-      {showDriveMenu && (
+        {showDriveMenu && (
         <div className="drive-overlay" role="presentation" onClick={() => setShowDriveMenu(false)}>
           <aside className="drive-menu panel" role="dialog" aria-modal="true" aria-label="Google Drive menu" onClick={(event) => event.stopPropagation()}>
             <div className="panel-header">
@@ -815,9 +840,9 @@ export default function Page() {
             </div>
           </aside>
         </div>
-      )}
+        )}
 
-      {activeSection === 'home' && (
+        {activeSection === 'home' && (
         <section className="home-workspace">
           <div className="workspace-heading">
             <div>
@@ -864,9 +889,9 @@ export default function Page() {
             />
           </section>
         </section>
-      )}
+        )}
 
-      {activeSection === 'dashboard' && (
+        {activeSection === 'dashboard' && (
         <section className="dashboard-workspace">
           <section className="summary-strip">
             <Metric label="Active employees" value={`${activeCount}`} />
@@ -875,7 +900,7 @@ export default function Page() {
             <Metric label="Alerts" value={`${totalAlerts}`} accent={totalAlerts > 0 ? 'warn' : 'good'} />
           </section>
           <section className="panel-grid dashboard-grid">
-          <article className="panel">
+          <article className="panel cost-summary">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Period</p>
@@ -900,7 +925,7 @@ export default function Page() {
               </button>
             </div>
           </article>
-          <article className="panel">
+          <article className="panel alerts-panel">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Current configuration</p>
@@ -924,9 +949,9 @@ export default function Page() {
           </article>
           </section>
         </section>
-      )}
+        )}
 
-      {activeSection === 'employees' && (
+        {activeSection === 'employees' && (
         <section className="panel-grid two-up">
           <article className="panel">
             <div className="panel-header">
@@ -1012,9 +1037,9 @@ export default function Page() {
             </div>
           </article>
         </section>
-      )}
+        )}
 
-      {activeSection === 'availability' && selectedEmployee && (
+        {activeSection === 'availability' && selectedEmployee && (
         <section className="panel-grid availability-grid">
           <article className="panel workspace-intro">
             <div className="workspace-heading">
@@ -1166,9 +1191,9 @@ export default function Page() {
             </div>
           </article>
         </section>
-      )}
+        )}
 
-      {activeSection === 'schedules' && (
+        {activeSection === 'schedules' && (
         <section className="panel-grid schedule-grid">
           <article className="panel schedule-command">
             <div className="workspace-heading">
@@ -1536,9 +1561,9 @@ export default function Page() {
             </ul>
           </article>
         </section>
-      )}
+        )}
 
-      {activeSection === 'guide' && (
+        {activeSection === 'guide' && (
         <UserGuide
           onOpenEmployees={() => goToSection('employees')}
           onOpenAvailability={() => goToSection('availability')}
@@ -1546,7 +1571,8 @@ export default function Page() {
           onOpenDashboard={() => goToSection('dashboard')}
           onOpenDrive={() => setShowDriveMenu(true)}
         />
-      )}
+        )}
+      </div>
     </main>
   );
 }

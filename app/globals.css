@@ -1,17 +1,17 @@
 :root {
   color-scheme: light;
-  --bg: #f6f8fb;
-  --surface: rgba(255, 255, 255, 0.88);
+  --bg: #f4f7fb;
+  --surface: rgba(255, 255, 255, 0.9);
   --surface-strong: #ffffff;
-  --line: rgba(22, 70, 59, 0.12);
-  --text: #17302a;
-  --muted: #5f726c;
-  --accent: #16463b;
-  --accent-soft: #7ea89a;
+  --line: rgba(100, 116, 139, 0.18);
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
+  --accent-soft: #93c5fd;
   --warn: #b65d21;
   --good: #1f7a56;
-  --shadow: 0 12px 30px rgba(18, 31, 28, 0.07);
-  --radius: 8px;
+  --shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+  --radius: 18px;
 }
 
 * {
@@ -24,11 +24,11 @@ body {
   padding: 0;
   min-height: 100%;
   background:
-    radial-gradient(circle at top left, rgba(126, 168, 154, 0.28), transparent 35%),
-    radial-gradient(circle at bottom right, rgba(182, 93, 33, 0.08), transparent 32%),
+    radial-gradient(circle at top left, rgba(147, 197, 253, 0.3), transparent 34%),
+    radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.08), transparent 30%),
     var(--bg);
   color: var(--text);
-  font-family: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
 body {
@@ -58,7 +58,7 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 3px solid rgba(31, 88, 73, 0.32);
+  outline: 3px solid rgba(37, 99, 235, 0.28);
   outline-offset: 2px;
 }
 
@@ -90,9 +90,60 @@ h3 {
 }
 
 .shell {
-  max-width: 1480px;
+  max-width: 1600px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 20px;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.sidebar {
+  position: sticky;
+  top: 20px;
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.sidebar-brand {
+  display: grid;
+  gap: 8px;
+}
+
+.sidebar-brand h1 {
+  margin-bottom: 0;
+  font-size: 1.55rem;
+}
+
+.sidebar-brand p {
+  margin: 0;
+}
+
+.sidebar-nav {
+  display: grid;
+  gap: 10px;
+}
+
+.sidebar-footer {
+  display: grid;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.app-main {
+  display: grid;
+  gap: 18px;
 }
 
 .eyebrow {
@@ -124,13 +175,24 @@ h3 {
 .topbar {
   display: flex;
   justify-content: space-between;
-  gap: 20px;
-  align-items: flex-end;
-  padding: 14px 0 12px;
+  gap: 18px;
+  align-items: center;
+  padding: 16px 20px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
 }
 
 .topbar-copy {
+  display: grid;
+  gap: 4px;
   max-width: 760px;
+}
+
+.topbar-copy h1 {
+  margin-bottom: 0;
 }
 
 .topbar-actions,
@@ -140,6 +202,42 @@ h3 {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.topbar-actions {
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.topbar-search {
+  min-width: 260px;
+  flex: 1 1 260px;
+}
+
+.topbar-search input {
+  width: 100%;
+  min-height: 48px;
+  border-radius: 999px;
+  padding-inline: 18px;
+  background: rgba(248, 250, 252, 0.95);
+}
+
+.topbar-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.sidebar .ghost-button,
+.sidebar .import-button {
+  width: 100%;
 }
 
 .summary-strip {
@@ -161,7 +259,7 @@ h3 {
 .panel,
 .drive-menu {
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: 24px;
   background: var(--surface);
   box-shadow: var(--shadow);
   backdrop-filter: blur(14px);
@@ -208,14 +306,13 @@ h3 {
 
 .section-nav {
   position: sticky;
-  top: 0;
+  top: 20px;
   z-index: 20;
-  display: flex;
+  display: grid;
   gap: 10px;
-  overflow-x: auto;
-  padding: 10px 0 16px;
-  background: rgba(246, 248, 251, 0.92);
-  backdrop-filter: blur(16px);
+  padding: 0;
+  background: transparent;
+  backdrop-filter: none;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -225,7 +322,7 @@ h3 {
 input,
 select,
 textarea {
-  border-radius: 8px;
+  border-radius: 14px;
   border: 1px solid var(--line);
   padding: 14px 16px;
   background: rgba(255, 255, 255, 0.82);
@@ -233,15 +330,19 @@ textarea {
 }
 
 .section-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   white-space: nowrap;
   cursor: pointer;
-  min-height: 48px;
+  min-height: 50px;
   font-weight: 600;
+  padding-inline: 16px;
 }
 
 .section-chip.active,
 .primary-button {
-  background: linear-gradient(180deg, #1f5849, var(--accent));
+  background: linear-gradient(180deg, #3b82f6, #2563eb);
   color: white;
   border-color: transparent;
 }
@@ -255,6 +356,21 @@ textarea {
   align-items: center;
   justify-content: center;
   text-align: center;
+}
+
+.ghost-button {
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.ghost-button:hover,
+.section-chip:hover,
+.primary-button:hover,
+.action-tile:hover,
+.metric:hover,
+.panel:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.1);
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
 }
 
 .ghost-button.small {
@@ -312,13 +428,33 @@ textarea {
 }
 
 .schedule-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.65fr);
+  align-items: start;
 }
 
-.schedule-grid > .printable-area,
-.schedule-grid > .review-area,
 .schedule-grid > .schedule-command {
   grid-column: 1 / -1;
+  order: 1;
+}
+
+.schedule-grid > .review-area {
+  grid-column: 1;
+  order: 2;
+}
+
+.schedule-grid > .cost-summary {
+  grid-column: 2;
+  order: 3;
+}
+
+.schedule-grid > .alerts-panel {
+  grid-column: 2;
+  order: 4;
+}
+
+.schedule-grid > .printable-area {
+  grid-column: 1 / -1;
+  order: 5;
 }
 
 .availability-grid {
@@ -429,7 +565,7 @@ textarea {
   gap: 14px;
   align-items: center;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.56);
   padding: 14px;
 }
@@ -441,8 +577,8 @@ textarea {
 }
 
 .employee-row.active {
-  border-color: rgba(22, 70, 59, 0.28);
-  background: rgba(22, 70, 59, 0.08);
+  border-color: rgba(37, 99, 235, 0.28);
+  background: rgba(37, 99, 235, 0.08);
 }
 
 .employee-row strong,
@@ -465,8 +601,8 @@ textarea {
   justify-content: center;
   min-height: 32px;
   padding: 0 12px;
-  border-radius: 8px;
-  background: rgba(22, 70, 59, 0.08);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.08);
   color: var(--accent);
   font-size: 0.85rem;
   font-weight: 700;
@@ -474,7 +610,7 @@ textarea {
 }
 
 .status-pill.good {
-  background: rgba(31, 122, 86, 0.12);
+  background: rgba(34, 197, 94, 0.12);
   color: var(--good);
 }
 
@@ -491,8 +627,8 @@ textarea {
 
 .subpanel {
   padding: 18px;
-  border-radius: 8px;
-  border: 1px solid rgba(22, 70, 59, 0.1);
+  border-radius: 18px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
   background: rgba(255, 255, 255, 0.56);
 }
 
@@ -520,7 +656,7 @@ textarea {
 .key-list li,
 .alert-list li {
   padding: 14px 16px;
-  border-radius: 8px;
+  border-radius: 18px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.62);
 }
@@ -569,7 +705,7 @@ textarea {
 
 .date-chip {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.74);
   padding: 10px;
   min-height: 62px;
@@ -597,7 +733,7 @@ textarea {
 .calendar-block,
 .week-card {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.62);
 }
 
@@ -617,7 +753,7 @@ textarea {
 
 .day-card {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.62);
   padding: 14px;
   display: grid;
@@ -642,7 +778,7 @@ textarea {
   gap: 14px;
   align-items: center;
   padding: 16px;
-  border-radius: 8px;
+  border-radius: 18px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.68);
   margin: 16px 0;
@@ -662,8 +798,8 @@ textarea {
   gap: 14px;
   align-items: center;
   padding: 16px;
-  border-radius: 8px;
-  border: 1px solid rgba(22, 70, 59, 0.12);
+  border-radius: 18px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
   background: rgba(255, 255, 255, 0.72);
   margin: 16px 0;
 }
@@ -682,7 +818,7 @@ textarea {
   align-items: start;
   padding: 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.7);
 }
 
@@ -692,8 +828,8 @@ textarea {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
-  background: rgba(22, 70, 59, 0.1);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.1);
   font-weight: 800;
   color: var(--accent);
 }
@@ -957,7 +1093,7 @@ textarea {
   gap: 14px;
   padding: 18px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 18px;
   background: var(--surface);
   box-shadow: var(--shadow);
 }
@@ -972,8 +1108,8 @@ textarea {
   justify-content: center;
   width: 34px;
   height: 34px;
-  border-radius: 8px;
-  background: rgba(22, 70, 59, 0.1);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.1);
   color: var(--accent);
   font-weight: 800;
 }
@@ -984,6 +1120,15 @@ textarea {
 }
 
 @media (max-width: 1120px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: relative;
+    top: auto;
+  }
+
   .summary-strip,
   .action-launcher,
   .guide-grid,
@@ -993,6 +1138,14 @@ textarea {
   .schedule-grid,
   .availability-grid {
     grid-template-columns: 1fr;
+  }
+
+  .schedule-grid > .schedule-command,
+  .schedule-grid > .review-area,
+  .schedule-grid > .cost-summary,
+  .schedule-grid > .alerts-panel,
+  .schedule-grid > .printable-area {
+    grid-column: 1 / -1;
   }
 }
 
@@ -1004,6 +1157,10 @@ textarea {
   .topbar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .topbar-search {
+    min-width: 0;
   }
 
   .topbar-actions {
@@ -1060,6 +1217,10 @@ textarea {
 
   .drive-overlay {
     align-items: flex-end;
+  }
+
+  .sidebar {
+    padding: 16px;
   }
 }
 
