@@ -5,8 +5,6 @@ import {
   DAYS,
   addDays,
   dayFullLabel,
-  dayLabel,
-  formatCurrency,
   formatTime,
   isoDateForWeekDay,
   scheduleAssignmentKey,
@@ -23,6 +21,7 @@ import {
   type Employee,
   type EmployeeAvailability,
   type GeneratedScheduleRange,
+  type ShiftTemplate,
   type StaffingRequirement,
 } from '../lib/staffing';
 import { createEmptyAvailability, createSeedState } from '../lib/seed';
@@ -35,7 +34,7 @@ import {
 } from '../lib/google-drive';
 import { withBasePath } from '../lib/base-path';
 
-type Section = 'home' | 'dashboard' | 'employees' | 'availability' | 'schedules' | 'guide';
+type Section = 'home' | 'dashboard' | 'employees' | 'availability' | 'setup' | 'schedules' | 'guide';
 type PeriodMode = 'thisWeek' | 'nextWeek' | 'twoWeeks' | 'custom';
 
 const SECTION_LABELS: Record<Section, string> = {
@@ -43,11 +42,12 @@ const SECTION_LABELS: Record<Section, string> = {
   dashboard: 'Dashboard',
   employees: 'Employees',
   availability: 'Availability',
+  setup: 'Setup',
   schedules: 'Schedules',
   guide: 'User Guide',
 };
 
-const WORKSPACE_SECTIONS: Section[] = ['home', 'schedules', 'availability', 'employees', 'dashboard', 'guide'];
+const WORKSPACE_SECTIONS: Section[] = ['home', 'schedules', 'setup', 'availability', 'employees', 'dashboard', 'guide'];
 
 const STORAGE_KEY = 'staffing-board-state-v1';
 const BACKUP_KEY = 'staffing-board-state-backup-v1';
@@ -59,8 +59,6 @@ function createEmployeeDraft(): Employee {
   return {
     id: uuid('emp'),
     name: '',
-    role: '',
-    hourlyWage: 18,
     minPreferredWeeklyHours: 12,
     maxAllowedWeeklyHours: 30,
     priorityLevel: 3,
@@ -84,6 +82,7 @@ function normalizeState(value: Partial<AppState> | null | undefined): AppState {
     employees: value?.employees ?? fallback.employees,
     availability: value?.availability ?? fallback.availability,
     businessHours: value?.businessHours ?? fallback.businessHours,
+    shiftTemplates: value?.shiftTemplates ?? fallback.shiftTemplates,
     staffingRequirements: value?.staffingRequirements ?? fallback.staffingRequirements,
     scheduleOverrides: value?.scheduleOverrides ?? {},
     schedulePublishedAt: value?.schedulePublishedAt ?? null,
@@ -210,6 +209,25 @@ function formatDayDate(date: Date) {
   });
 }
 
+function normalizeSearchValue(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9\s:-]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+const QUICK_TIME_PRESETS = [
+  { label: 'Morning', start: '08:00', end: '12:00' },
+  { label: 'Midday', start: '12:00', end: '16:00' },
+  { label: 'Afternoon', start: '14:00', end: '18:00' },
+  { label: 'Evening', start: '16:00', end: '20:00' },
+  { label: 'Full day', start: '08:00', end: '18:00' },
+] as const;
+
+const DEFAULT_SHIFT_TEMPLATES: Array<Pick<ShiftTemplate, 'label' | 'start' | 'end' | 'requiredStaff'>> = [
+  { label: 'Open', start: '08:00', end: '12:00', requiredStaff: 2 },
+  { label: 'Midday', start: '10:00', end: '14:00', requiredStaff: 3 },
+  { label: 'Close', start: '14:00', end: '18:00', requiredStaff: 2 },
+  { label: 'Full day', start: '08:00', end: '17:00', requiredStaff: 1 },
+];
+
 function sectionHref(section: Section) {
   return `#${section}`;
 }
@@ -218,13 +236,6 @@ function sectionFromHash() {
   if (typeof window === 'undefined') return 'home' as Section;
   const hash = window.location.hash.replace('#', '') as Section;
   return WORKSPACE_SECTIONS.includes(hash) ? hash : 'home';
-}
-
-function isDateInPeriod(date: string, start: Date, end: Date) {
-  const value = date.slice(0, 10);
-  const startValue = start.toISOString().slice(0, 10);
-  const endValue = end.toISOString().slice(0, 10);
-  return value >= startValue && value <= endValue;
 }
 
 function buildSortedRequirements(requirements: StaffingRequirement[]) {
@@ -254,7 +265,7 @@ function buildWeekSections(range: GeneratedScheduleRange, requirements: Staffing
           };
         }),
       dayAssignments: week.schedule.assignments.filter((assignment) => assignment.day === day),
-      dayCost: week.schedule.dayCost[day] ?? 0,
+      dayHours: week.schedule.dayHours[day] ?? 0,
     }));
 
     return {
@@ -262,6 +273,114 @@ function buildWeekSections(range: GeneratedScheduleRange, requirements: Staffing
       dayCards,
     };
   });
+}
+
+type SearchSuggestion =
+  | { id: string; type: 'section'; label: string; detail: string; section: Section }
+  | { id: string; type: 'employee'; label: string; detail: string; employeeId: string; section: Section }
+  | { id: string; type: 'template'; label: string; detail: string; templateId: string; section: Section }
+  | { id: string; type: 'action'; label: string; detail: string; section: Section };
+
+function buildSmartSearchSuggestions(args: {
+  query: string;
+  employees: Employee[];
+  templates: Array<ShiftTemplate>;
+}): SearchSuggestion[] {
+  const queryValue = normalizeSearchValue(args.query);
+  const tokens = queryValue ? queryValue.split(' ') : [];
+  const suggestions: SearchSuggestion[] = [];
+
+  const addUnique = (item: SearchSuggestion) => {
+    if (!suggestions.some((entry) => entry.id === item.id)) {
+      suggestions.push(item);
+    }
+  };
+
+  const toSectionSuggestion = (section: { id: string; label: string; detail: string; section: Section }) => ({
+    ...section,
+    type: 'section' as const,
+  });
+
+  const sectionLookup: Array<{ id: string; label: string; detail: string; section: Section; keywords: string[] }> = [
+    { id: 'section-home', label: 'Home', detail: 'Owner workspace', section: 'home', keywords: ['home', 'dashboard'] },
+    { id: 'section-dashboard', label: 'Dashboard', detail: 'Quick totals', section: 'dashboard', keywords: ['dashboard', 'totals', 'summary'] },
+    { id: 'section-employees', label: 'Employees', detail: 'People and hours', section: 'employees', keywords: ['employee', 'employees', 'people', 'team'] },
+    { id: 'section-availability', label: 'Availability', detail: 'Weekly availability', section: 'availability', keywords: ['availability', 'available', 'unavailable', 'time off'] },
+    { id: 'section-setup', label: 'Setup', detail: 'Shift templates and business hours', section: 'setup', keywords: ['setup', 'admin', 'shift', 'template', 'hours'] },
+    { id: 'section-schedules', label: 'Schedules', detail: 'Build and publish shifts', section: 'schedules', keywords: ['schedule', 'schedules', 'shift', 'publish'] },
+    { id: 'section-guide', label: 'User Guide', detail: 'Plain-language help', section: 'guide', keywords: ['guide', 'help', 'how to'] },
+  ];
+
+  if (!queryValue) {
+    sectionLookup.slice(0, 5).forEach((section) => {
+      addUnique(toSectionSuggestion(section));
+    });
+    if (args.templates[0]) {
+      addUnique({
+        id: `template-${args.templates[0].id}`,
+        type: 'template',
+        label: `Quick add ${args.templates[0].label}`,
+        detail: `${args.templates[0].start} - ${args.templates[0].end}`,
+        templateId: args.templates[0].id,
+        section: 'setup',
+      });
+    }
+    return suggestions;
+  }
+
+  const sectionScore = (keywords: string[]) => {
+    const keywordText = keywords.join(' ');
+    return Number(keywords.some((keyword) => queryValue.includes(keyword) || keyword.includes(queryValue))) + Number(tokens.some((token) => keywordText.includes(token)));
+  };
+
+  sectionLookup
+    .map((section) => ({ section, score: sectionScore(section.keywords) }))
+    .filter(({ score }) => score > 0 || queryValue.length < 3)
+    .sort((a, b) => b.score - a.score)
+    .forEach(({ section }) => addUnique(toSectionSuggestion(section)));
+
+  args.employees
+    .filter((employee) => normalizeSearchValue(employee.name).includes(queryValue))
+    .slice(0, 5)
+    .forEach((employee) =>
+      addUnique({
+        id: `employee-${employee.id}`,
+        type: 'employee',
+        label: employee.name,
+        detail: `${employee.priorityLevel} priority • ${employee.minPreferredWeeklyHours}-${employee.maxAllowedWeeklyHours} hrs`,
+        employeeId: employee.id,
+        section: queryValue.includes('avail') ? 'availability' : 'employees',
+      }),
+    );
+
+  args.templates
+    .filter((template) => normalizeSearchValue(`${template.label} ${template.start} ${template.end}`).includes(queryValue) || queryValue.includes(normalizeSearchValue(template.label)))
+    .slice(0, 5)
+    .forEach((template) =>
+      addUnique({
+        id: `template-${template.id}`,
+        type: 'template',
+        label: `${template.label} shift`,
+        detail: `${template.start} - ${template.end} • ${template.requiredStaff} staff`,
+        templateId: template.id,
+        section: 'setup',
+      }),
+    );
+
+  if (queryValue.includes('8') || queryValue.includes('5') || queryValue.includes('open') || queryValue.includes('close') || queryValue.includes('shift')) {
+    args.templates.slice(0, 3).forEach((template) =>
+      addUnique({
+        id: `template-smart-${template.id}`,
+        type: 'template',
+        label: `Add ${template.start} - ${template.end}`,
+        detail: `${template.label} template`,
+        templateId: template.id,
+        section: 'setup',
+      }),
+    );
+  }
+
+  return suggestions.slice(0, 8);
 }
 
 export default function Page() {
@@ -278,23 +397,25 @@ export default function Page() {
   const [driveBackupFileId, setDriveBackupFileId] = useState<string | null>(null);
   const [driveBackupAt, setDriveBackupAt] = useState<string | null>(null);
   const [showDriveMenu, setShowDriveMenu] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
   const [lastGeneratedAt, setLastGeneratedAt] = useState<string | null>(null);
   const [rangeDraft, setRangeDraft] = useState({ day: 'mon' as DayKey, start: '09:00', end: '17:00' });
-  const [weeklyUnavailabilityDraft, setWeeklyUnavailabilityDraft] = useState({ day: 'mon' as DayKey, start: '12:00', end: '13:00' });
-  const [exceptionDraft, setExceptionDraft] = useState({
-    date: new Date().toISOString().slice(0, 10),
-    start: '09:00',
+  const [businessHoursDraft, setBusinessHoursDraft] = useState({ day: 'mon' as DayKey, start: '08:00', end: '18:00' });
+  const [templateDraft, setTemplateDraft] = useState({
+    label: 'Open',
+    start: '08:00',
     end: '12:00',
-    type: 'unavailable' as 'available' | 'unavailable',
+    requiredStaff: 2,
     notes: '',
   });
-  const [businessHoursDraft, setBusinessHoursDraft] = useState({ day: 'mon' as DayKey, start: '08:00', end: '18:00' });
+  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
   const [requirementDraft, setRequirementDraft] = useState({
     day: 'mon' as DayKey,
     start: '09:00',
     end: '12:00',
     requiredStaff: 2,
-    role: '',
     notes: '',
   });
 
@@ -380,9 +501,24 @@ export default function Page() {
 
   const activeCount = state.employees.filter((employee) => employee.active).length;
   const activeEmployees = state.employees.filter((employee) => employee.active);
-  const totalAssignedHours = Object.values(reviewedRange.employeeHours).reduce((sum, value) => sum + value, 0);
+  const activeShiftTemplates: ShiftTemplate[] = state.shiftTemplates.length
+    ? state.shiftTemplates
+    : DEFAULT_SHIFT_TEMPLATES.map((template, index) => ({
+        id: `template-${index}`,
+        ...template,
+      }));
+  const totalAssignedHours = reviewedRange.totalHours;
   const totalAlerts = validationMessages.length + reviewedRange.alerts.length;
   const underfilledCount = reviewedRange.alerts.filter((alert) => alert.kind === 'understaffed').length;
+  const searchSuggestions = useMemo(
+    () =>
+      buildSmartSearchSuggestions({
+        query: searchQuery,
+        employees: state.employees,
+        templates: activeShiftTemplates,
+      }),
+    [activeShiftTemplates, searchQuery, state.employees],
+  );
 
   function persistNextState(nextState: AppState) {
     const publishedAt = nextState.schedulePublishedAt !== state.schedulePublishedAt ? nextState.schedulePublishedAt : null;
@@ -447,44 +583,7 @@ export default function Page() {
     });
   }
 
-  function addWeeklyUnavailability() {
-    if (!selectedEmployee) return;
-    if (!weeklyUnavailabilityDraft.start || !weeklyUnavailabilityDraft.end) return;
-    persistNextState({
-      ...state,
-      availability: updateAvailabilityMap(state.availability, selectedEmployee.id, (entry) => ({
-        ...entry,
-        weeklyUnavailability: [
-          ...entry.weeklyUnavailability,
-          { day: weeklyUnavailabilityDraft.day, ranges: [{ start: weeklyUnavailabilityDraft.start, end: weeklyUnavailabilityDraft.end }] },
-        ],
-      })),
-    });
-  }
-
-  function addException() {
-    if (!selectedEmployee) return;
-    if (!exceptionDraft.date || !exceptionDraft.start || !exceptionDraft.end) return;
-    persistNextState({
-      ...state,
-      availability: updateAvailabilityMap(state.availability, selectedEmployee.id, (entry) => ({
-        ...entry,
-        exceptions: [
-          ...entry.exceptions,
-          {
-            id: uuid('exc'),
-            date: exceptionDraft.date,
-            type: exceptionDraft.type,
-            start: exceptionDraft.start,
-            end: exceptionDraft.end,
-            notes: exceptionDraft.notes,
-          },
-        ],
-      })),
-    });
-  }
-
-  function removeAvailabilityRule(type: 'weeklyAvailability' | 'weeklyUnavailability' | 'exceptions', id: string) {
+  function removeAvailabilityRule(type: 'weeklyAvailability', id: string) {
     if (!selectedEmployee) return;
     persistNextState({
       ...state,
@@ -494,11 +593,8 @@ export default function Page() {
           type === 'weeklyAvailability'
             ? entry.weeklyAvailability.filter((item, index) => `${item.day}-${index}` !== id)
             : entry.weeklyAvailability,
-        weeklyUnavailability:
-          type === 'weeklyUnavailability'
-            ? entry.weeklyUnavailability.filter((item, index) => `${item.day}-${index}` !== id)
-            : entry.weeklyUnavailability,
-        exceptions: type === 'exceptions' ? entry.exceptions.filter((item) => item.id !== id) : entry.exceptions,
+        weeklyUnavailability: entry.weeklyUnavailability,
+        exceptions: entry.exceptions,
       })),
     });
   }
@@ -522,6 +618,63 @@ export default function Page() {
     });
   }
 
+  function saveShiftTemplate() {
+    if (!templateDraft.label.trim() || !templateDraft.start || !templateDraft.end || templateDraft.requiredStaff < 1) return;
+    const nextTemplate = {
+      id: editingTemplateId ?? uuid('tpl'),
+      label: templateDraft.label.trim(),
+      start: templateDraft.start,
+      end: templateDraft.end,
+      requiredStaff: templateDraft.requiredStaff,
+      notes: templateDraft.notes.trim(),
+    };
+    persistNextState({
+      ...state,
+      shiftTemplates: editingTemplateId
+        ? state.shiftTemplates.map((template) => (template.id === editingTemplateId ? nextTemplate : template))
+        : [...state.shiftTemplates, nextTemplate],
+    });
+    setEditingTemplateId(null);
+    setTemplateDraft({
+      label: 'Open',
+      start: '08:00',
+      end: '12:00',
+      requiredStaff: 2,
+      notes: '',
+    });
+  }
+
+  function editShiftTemplate(templateId: string) {
+    const template = state.shiftTemplates.find((entry) => entry.id === templateId);
+    if (!template) return;
+    setEditingTemplateId(template.id);
+    setTemplateDraft({
+      label: template.label,
+      start: template.start,
+      end: template.end,
+      requiredStaff: template.requiredStaff,
+      notes: template.notes ?? '',
+    });
+    goToSection('setup');
+  }
+
+  function deleteShiftTemplate(templateId: string) {
+    persistNextState({
+      ...state,
+      shiftTemplates: state.shiftTemplates.filter((template) => template.id !== templateId),
+    });
+    if (editingTemplateId === templateId) {
+      setEditingTemplateId(null);
+      setTemplateDraft({
+        label: 'Open',
+        start: '08:00',
+        end: '12:00',
+        requiredStaff: 2,
+        notes: '',
+      });
+    }
+  }
+
   function deleteBusinessHours(day: DayKey, index: number) {
     persistNextState({
       ...state,
@@ -531,8 +684,8 @@ export default function Page() {
     });
   }
 
-  function addRequirement() {
-    if (!requirementDraft.start || !requirementDraft.end || requirementDraft.requiredStaff < 1) return;
+  function addRequirementFromTemplate(template: ShiftTemplate) {
+    if (!requirementDraft.day) return;
     persistNextState({
       ...state,
       staffingRequirements: [
@@ -540,14 +693,14 @@ export default function Page() {
         {
           id: uuid('req'),
           day: requirementDraft.day,
-          start: requirementDraft.start,
-          end: requirementDraft.end,
-          requiredStaff: requirementDraft.requiredStaff,
-          role: requirementDraft.role,
-          notes: requirementDraft.notes,
+          start: template.start,
+          end: template.end,
+          requiredStaff: template.requiredStaff,
+          notes: template.notes ?? template.label,
         },
       ].sort((a, b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0)),
     });
+    goToSection('schedules');
   }
 
   function deleteRequirement(id: string) {
@@ -676,6 +829,37 @@ export default function Page() {
     }
   }
 
+  function openEmployee(employeeId: string, section: Section = 'employees') {
+    setSelectedEmployeeId(employeeId);
+    goToSection(section);
+    setSearchQuery('');
+    setSearchFocused(false);
+  }
+
+  function selectSearchSuggestion(suggestion: SearchSuggestion) {
+    if (suggestion.type === 'section') {
+      goToSection(suggestion.section);
+    } else if (suggestion.type === 'employee') {
+      openEmployee(suggestion.employeeId, suggestion.section);
+    } else if (suggestion.type === 'template') {
+      const template = activeShiftTemplates.find((entry) => entry.id === suggestion.templateId);
+      if (template) {
+        setTemplateDraft({
+          label: template.label,
+          start: template.start,
+          end: template.end,
+          requiredStaff: template.requiredStaff,
+          notes: template.notes ?? '',
+        });
+      }
+      goToSection(suggestion.section);
+    } else {
+      goToSection(suggestion.section);
+    }
+    setSearchQuery('');
+    setSearchFocused(false);
+  }
+
   function refreshSchedule() {
     setLastGeneratedAt(new Date().toISOString());
   }
@@ -720,10 +904,8 @@ export default function Page() {
   const employeeRows = state.employees.map((employee) => ({
     ...employee,
     hours: reviewedRange.employeeHours[employee.id] ?? 0,
-    cost: reviewedRange.employeeCost[employee.id] ?? 0,
   }));
 
-  const availableExceptionRows = selectedEmployeeAvailability.exceptions.filter((entry) => isDateInPeriod(entry.date, selectedPeriod.start, selectedPeriod.end));
   const scheduleWarnings = [...validationMessages, ...reviewedRange.alerts.map((warning) => warning.message)];
 
   return (
@@ -785,20 +967,91 @@ export default function Page() {
             <p className="sync-line">Tablet-first scheduling for small teams.</p>
           </div>
           <div className="topbar-actions">
-            <label className="topbar-search" aria-label="Search">
-              <input type="search" placeholder="Search employees, shifts, notes" />
-            </label>
+            <div className="topbar-search-wrap">
+              <label className="topbar-search" aria-label="Search">
+                <input
+                  type="search"
+                  placeholder="Search employees, setup, shifts"
+                  value={searchQuery}
+                  onChange={(event) => {
+                    setSearchQuery(event.target.value);
+                    setSearchFocused(true);
+                  }}
+                  onFocus={() => setSearchFocused(true)}
+                  onBlur={() => window.setTimeout(() => setSearchFocused(false), 120)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      setSearchQuery('');
+                      setSearchFocused(false);
+                    }
+                    if (event.key === 'Enter' && searchSuggestions[0]) {
+                      event.preventDefault();
+                      selectSearchSuggestion(searchSuggestions[0]);
+                    }
+                  }}
+                />
+              </label>
+              {searchFocused && (searchQuery.trim() || searchSuggestions.length > 0) && (
+                <div className="search-dropdown panel" role="listbox" aria-label="Search suggestions">
+                  {searchSuggestions.length ? (
+                    searchSuggestions.map((suggestion) => (
+                      <button
+                        key={suggestion.id}
+                        className="search-result"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => selectSearchSuggestion(suggestion)}
+                      >
+                        <span>
+                          <strong>{suggestion.label}</strong>
+                          <small>{suggestion.detail}</small>
+                        </span>
+                        <span className="status-pill">{SECTION_LABELS[suggestion.section]}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="muted">No matches yet. Try an employee name, setup, or a shift time like 8 to 5.</p>
+                  )}
+                </div>
+              )}
+            </div>
             <span className="topbar-badge" aria-label="Selected period">
               {activePeriodLabel}
             </span>
             <button className="ghost-button" aria-label="Notifications">
               Notifications
             </button>
-            <button className="ghost-button" aria-label="User menu">
+            <button className="ghost-button" aria-label="User menu" onClick={() => setShowUserMenu((current) => !current)}>
               JD
             </button>
           </div>
         </header>
+
+        {showUserMenu && (
+          <div className="drive-overlay" role="presentation" onClick={() => setShowUserMenu(false)}>
+            <aside className="drive-menu panel" role="dialog" aria-modal="true" aria-label="User menu" onClick={(event) => event.stopPropagation()}>
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Account</p>
+                  <h2>Owner menu</h2>
+                </div>
+                <button className="ghost-button small" onClick={() => setShowUserMenu(false)}>
+                  Close
+                </button>
+              </div>
+              <div className="backup-actions">
+                <button className="ghost-button" onClick={() => goToSection('dashboard')}>
+                  Open dashboard
+                </button>
+                <button className="ghost-button" onClick={() => goToSection('guide')}>
+                  Open user guide
+                </button>
+                <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
+                  Google Drive backup
+                </button>
+              </div>
+            </aside>
+          </div>
+        )}
 
         {showDriveMenu && (
         <div className="drive-overlay" role="presentation" onClick={() => setShowDriveMenu(false)}>
@@ -861,21 +1114,28 @@ export default function Page() {
             />
             <ActionTile
               title="Availability"
-              description="Weekly availability, unavailable blocks, and date exceptions."
+            description="Weekly availability for each employee."
               buttonLabel="Open availability"
               href={sectionHref('availability')}
               onClick={() => goToSection('availability')}
             />
             <ActionTile
+              title="Setup"
+              description="Reusable shift templates and business hours."
+              buttonLabel="Open setup"
+              href={sectionHref('setup')}
+              onClick={() => goToSection('setup')}
+            />
+            <ActionTile
               title="Employees"
-              description="Names, roles, wages, hour limits, and priority."
+              description="Names, hour limits, and priority."
               buttonLabel="Open employees"
               href={sectionHref('employees')}
               onClick={() => goToSection('employees')}
             />
             <ActionTile
               title="Dashboard"
-              description="Quick totals for cost, hours, alerts, and schedule health."
+              description="Quick totals for hours, alerts, and schedule health."
               buttonLabel="Open dashboard"
               href={sectionHref('dashboard')}
               onClick={() => goToSection('dashboard')}
@@ -895,12 +1155,12 @@ export default function Page() {
         <section className="dashboard-workspace">
           <section className="summary-strip">
             <Metric label="Active employees" value={`${activeCount}`} />
-            <Metric label="Selected period cost" value={formatCurrency(reviewedRange.totalCost)} />
-            <Metric label="Assigned hours" value={`${totalAssignedHours.toFixed(1)} hrs`} />
+            <Metric label="Selected period hours" value={`${totalAssignedHours.toFixed(1)} hrs`} />
+            <Metric label="Scheduled days" value={`${reviewedRange.weeks.length * 7}`} />
             <Metric label="Alerts" value={`${totalAlerts}`} accent={totalAlerts > 0 ? 'warn' : 'good'} />
           </section>
           <section className="panel-grid dashboard-grid">
-          <article className="panel cost-summary">
+          <article className="panel schedule-summary">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Period</p>
@@ -943,7 +1203,7 @@ export default function Page() {
                 <strong>{underfilledCount}</strong> understaffed periods detected
               </li>
               <li>
-                <strong>{formatCurrency(reviewedRange.totalCost)}</strong> projected period labor cost
+                <strong>{totalAssignedHours.toFixed(1)} hrs</strong> projected period coverage
               </li>
             </ul>
           </article>
@@ -979,9 +1239,7 @@ export default function Page() {
                 >
                   <span>
                     <strong>{employee.name}</strong>
-                    <small>
-                      {employee.role || 'No role'} • {formatCurrency(employee.hourlyWage)}/hr
-                    </small>
+                    <small>{employee.priorityLevel} priority • {employee.active ? 'Active' : 'Inactive'}</small>
                   </span>
                   <span className={employee.active ? 'status-pill good' : 'status-pill muted'}>
                     {employee.active ? 'Active' : 'Inactive'}
@@ -1001,12 +1259,6 @@ export default function Page() {
             <div className="form-grid">
               <Field label="Name">
                 <input value={employeeDraft.name} onChange={(event) => updateSelectedEmployee({ name: event.target.value })} />
-              </Field>
-              <Field label="Role">
-                <input value={employeeDraft.role} onChange={(event) => updateSelectedEmployee({ role: event.target.value })} />
-              </Field>
-              <Field label="Hourly wage">
-                <input type="number" min="0" step="0.5" value={employeeDraft.hourlyWage} onChange={(event) => updateSelectedEmployee({ hourlyWage: Number(event.target.value) })} />
               </Field>
               <Field label="Priority">
                 <input type="number" min="1" max="5" value={employeeDraft.priorityLevel} onChange={(event) => updateSelectedEmployee({ priorityLevel: Number(event.target.value) })} />
@@ -1041,30 +1293,14 @@ export default function Page() {
 
         {activeSection === 'availability' && selectedEmployee && (
         <section className="panel-grid availability-grid">
-          <article className="panel workspace-intro">
-            <div className="workspace-heading">
-              <div>
-                <p className="eyebrow">Availability</p>
-                <h2>Set who can work during the selected dates</h2>
-              </div>
-              <select value={selectedEmployee.id} onChange={(event) => setSelectedEmployeeId(event.target.value)}>
-                {state.employees.map((employee) => (
-                  <option key={employee.id} value={employee.id}>
-                    {employee.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <PeriodSelector period={period} setPeriod={setPeriod} />
-            <WeekDateStrip start={selectedPeriod.start} end={selectedPeriod.end} />
-          </article>
           <article className="panel">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Employee</p>
-                <h2>{selectedEmployee.name}</h2>
+                <p className="eyebrow">Employees</p>
+                <h2>Pick someone to edit</h2>
               </div>
             </div>
+            <p className="muted">Select an employee, then set the weekly hours they can work.</p>
             <div className="employee-selector-list">
               {state.employees.map((employee) => (
                 <button
@@ -1074,18 +1310,39 @@ export default function Page() {
                 >
                   <span>
                     <strong>{employee.name}</strong>
-                    <small>{employee.role || 'Team member'}</small>
+                    <small>{employee.priorityLevel} priority</small>
                   </span>
                 </button>
               ))}
             </div>
+          </article>
+
+          <article className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Weekly availability</p>
+                <h2>{selectedEmployee.name}</h2>
+              </div>
+            </div>
+            <p className="muted">This is recurring availability that repeats every week.</p>
 
             <div className="subpanel">
               <div className="panel-header compact">
                 <div>
-                  <h3>Add available hours</h3>
-                  <p className="muted">These hours repeat on the selected weekday.</p>
+                  <h3>Quick add hours</h3>
+                  <p className="muted">Choose a common block or enter a custom time.</p>
                 </div>
+              </div>
+              <div className="preset-row">
+                {QUICK_TIME_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    className="ghost-button small"
+                    onClick={() => setRangeDraft((current) => ({ ...current, start: preset.start, end: preset.end }))}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
               </div>
               <div className="form-inline">
                 <select value={rangeDraft.day} onChange={(event) => setRangeDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
@@ -1098,8 +1355,17 @@ export default function Page() {
                 <input type="time" value={rangeDraft.start} onChange={(event) => setRangeDraft((current) => ({ ...current, start: event.target.value }))} />
                 <input type="time" value={rangeDraft.end} onChange={(event) => setRangeDraft((current) => ({ ...current, end: event.target.value }))} />
                 <button className="primary-button" onClick={addWeeklyAvailability}>
-                  Add
+                  Add hours
                 </button>
+              </div>
+            </div>
+
+            <div className="subpanel">
+              <div className="panel-header compact">
+                <div>
+                  <h3>Current weekly hours</h3>
+                  <p className="muted">These hours repeat every week until you change them.</p>
+                </div>
               </div>
               <RuleList
                 items={selectedEmployeeAvailability.weeklyAvailability.map((item, index) => ({
@@ -1109,85 +1375,156 @@ export default function Page() {
                 onDelete={(id) => removeAvailabilityRule('weeklyAvailability', id)}
               />
             </div>
+          </article>
+        </section>
+        )}
 
-            <div className="subpanel">
-              <div className="panel-header compact">
-                <div>
-                  <h3>Add unavailable hours</h3>
-                  <p className="muted">Use this for recurring blocks the employee cannot work.</p>
-                </div>
+        {activeSection === 'setup' && (
+        <section className="panel-grid two-up setup-grid">
+          <article className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Business hours</p>
+                <h2>Quick owner setup</h2>
               </div>
-              <div className="form-inline">
-                <select value={weeklyUnavailabilityDraft.day} onChange={(event) => setWeeklyUnavailabilityDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
-                  {DAYS.map((day) => (
-                    <option key={day} value={day}>
-                      {dayFullLabel(day)}
-                    </option>
-                  ))}
-                </select>
-                <input type="time" value={weeklyUnavailabilityDraft.start} onChange={(event) => setWeeklyUnavailabilityDraft((current) => ({ ...current, start: event.target.value }))} />
-                <input type="time" value={weeklyUnavailabilityDraft.end} onChange={(event) => setWeeklyUnavailabilityDraft((current) => ({ ...current, end: event.target.value }))} />
-                <button className="primary-button" onClick={addWeeklyUnavailability}>
-                  Add
+            </div>
+            <div className="preset-row">
+              {QUICK_TIME_PRESETS.map((preset) => (
+                <button
+                  key={preset.label}
+                  className="ghost-button small"
+                  onClick={() => setBusinessHoursDraft((current) => ({ ...current, start: preset.start, end: preset.end }))}
+                >
+                  {preset.label}
                 </button>
-              </div>
-              <RuleList
-                items={selectedEmployeeAvailability.weeklyUnavailability.map((item, index) => ({
-                  id: `${item.day}-${index}`,
-                  label: `${dayFullLabel(item.day)} ${item.ranges.map((range) => formatRange(range.start, range.end)).join(', ')}`,
-                }))}
-                onDelete={(id) => removeAvailabilityRule('weeklyUnavailability', id)}
-              />
+              ))}
+            </div>
+            <div className="form-inline">
+              <select value={businessHoursDraft.day} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
+                {DAYS.map((day) => (
+                  <option key={day} value={day}>
+                    {dayFullLabel(day)}
+                  </option>
+                ))}
+              </select>
+              <input type="time" value={businessHoursDraft.start} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, start: event.target.value }))} />
+              <input type="time" value={businessHoursDraft.end} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, end: event.target.value }))} />
+              <button className="primary-button" onClick={addBusinessHours}>
+                Save hours
+              </button>
+            </div>
+            <div className="stack">
+              {DAYS.map((day) => {
+                const rule = state.businessHours.find((entry) => entry.day === day);
+                return (
+                  <div key={day} className="day-row">
+                    <div>
+                      <strong>{dayFullLabel(day)}</strong>
+                      <p className="muted">
+                        {rule?.ranges.length
+                          ? rule.ranges.map((range) => formatRange(range.start, range.end)).join(', ')
+                          : 'Closed'}
+                      </p>
+                    </div>
+                    <div className="row-actions">
+                      {(rule?.ranges ?? []).map((range, index) => (
+                        <button key={`${day}-${index}`} className="ghost-button small" onClick={() => deleteBusinessHours(day, index)}>
+                          Remove
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </article>
 
           <article className="panel">
-            <div className="subpanel">
-              <div className="panel-header compact">
-                <div>
-                  <h3>Date-specific exceptions</h3>
-                  <p className="muted">
-                    Add a change for one exact date without rewriting recurring availability.
-                  </p>
-                </div>
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Shift templates</p>
+                <h2>Reusable quick adds</h2>
               </div>
-              <div className="form-grid narrow">
-                <Field label="Date">
-                  <input type="date" value={exceptionDraft.date} onChange={(event) => setExceptionDraft((current) => ({ ...current, date: event.target.value }))} />
-                </Field>
-                <Field label="Type">
-                  <select value={exceptionDraft.type} onChange={(event) => setExceptionDraft((current) => ({ ...current, type: event.target.value as 'available' | 'unavailable' }))}>
-                    <option value="unavailable">Unavailable</option>
-                    <option value="available">Available</option>
-                  </select>
-                </Field>
-                <Field label="Start">
-                  <input type="time" value={exceptionDraft.start} onChange={(event) => setExceptionDraft((current) => ({ ...current, start: event.target.value }))} />
-                </Field>
-                <Field label="End">
-                  <input type="time" value={exceptionDraft.end} onChange={(event) => setExceptionDraft((current) => ({ ...current, end: event.target.value }))} />
-                </Field>
-                <Field label="Notes">
-                  <input value={exceptionDraft.notes} onChange={(event) => setExceptionDraft((current) => ({ ...current, notes: event.target.value }))} />
-                </Field>
-              </div>
-              <button className="primary-button" onClick={addException}>
-                Add exception
+            </div>
+            <div className="preset-row">
+              {DEFAULT_SHIFT_TEMPLATES.map((preset) => (
+                <button
+                  key={preset.label}
+                  className="ghost-button small"
+                  onClick={() =>
+                    setTemplateDraft((current) => ({
+                      ...current,
+                      label: preset.label,
+                      start: preset.start,
+                      end: preset.end,
+                      requiredStaff: preset.requiredStaff,
+                    }))
+                  }
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <div className="form-grid narrow">
+              <Field label="Label">
+                <input value={templateDraft.label} onChange={(event) => setTemplateDraft((current) => ({ ...current, label: event.target.value }))} />
+              </Field>
+              <Field label="Start">
+                <input type="time" value={templateDraft.start} onChange={(event) => setTemplateDraft((current) => ({ ...current, start: event.target.value }))} />
+              </Field>
+              <Field label="End">
+                <input type="time" value={templateDraft.end} onChange={(event) => setTemplateDraft((current) => ({ ...current, end: event.target.value }))} />
+              </Field>
+              <Field label="Staff needed">
+                <input type="number" min="1" step="1" value={templateDraft.requiredStaff} onChange={(event) => setTemplateDraft((current) => ({ ...current, requiredStaff: Number(event.target.value) }))} />
+              </Field>
+              <Field label="Notes">
+                <input value={templateDraft.notes} onChange={(event) => setTemplateDraft((current) => ({ ...current, notes: event.target.value }))} />
+              </Field>
+            </div>
+            <div className="inline-actions">
+              <button className="primary-button" onClick={saveShiftTemplate}>
+                {editingTemplateId ? 'Update template' : 'Save template'}
               </button>
-              <div className="spacer" />
-              <div className="panel-header compact">
-                <div>
-                  <h3>Exceptions in this period</h3>
-                  <p className="muted">{selectedPeriod.label}</p>
+              {editingTemplateId && (
+                <button
+                  className="ghost-button"
+                  onClick={() => {
+                    setEditingTemplateId(null);
+                    setTemplateDraft({
+                      label: 'Open',
+                      start: '08:00',
+                      end: '12:00',
+                      requiredStaff: 2,
+                      notes: '',
+                    });
+                  }}
+                >
+                  Cancel edit
+                </button>
+              )}
+            </div>
+            <div className="spacer" />
+            <div className="scroll-list">
+              {state.shiftTemplates.map((template) => (
+                <div key={template.id} className="requirement-row">
+                  <div>
+                    <strong>{template.label}</strong>
+                    <p className="muted">
+                      {template.start} - {template.end} • {template.requiredStaff} staff
+                    </p>
+                    <p className="muted">{template.notes || 'Quick add template'}</p>
+                  </div>
+                  <div className="row-actions">
+                    <button className="ghost-button small" onClick={() => editShiftTemplate(template.id)}>
+                      Edit
+                    </button>
+                    <button className="ghost-button small" onClick={() => deleteShiftTemplate(template.id)}>
+                      Remove
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <RuleList
-                items={availableExceptionRows.map((item) => ({
-                  id: item.id,
-                  label: `${item.date} ${item.start} - ${item.end} ${item.type}${item.notes ? ` • ${item.notes}` : ''}`,
-                }))}
-                onDelete={(id) => removeAvailabilityRule('exceptions', id)}
-              />
+              ))}
             </div>
           </article>
         </section>
@@ -1205,6 +1542,9 @@ export default function Page() {
                 <button className="primary-button" onClick={refreshSchedule}>
                   Generate Schedule
                 </button>
+                <button className="ghost-button" onClick={() => goToSection('setup')}>
+                  Open setup
+                </button>
                 <button className="ghost-button" onClick={() => window.print()}>
                   Export Whiteboard Calendar PDF
                 </button>
@@ -1218,13 +1558,42 @@ export default function Page() {
               </div>
               <div className="schedule-step">
                 <span>2</span>
-                <strong>Set Coverage</strong>
-                <p>{state.staffingRequirements.length} staffing block(s) and {activeEmployees.length} active employee(s)</p>
+                <strong>Add Shifts</strong>
+                <p>Pick a day, tap a template, and build the week in a few taps.</p>
               </div>
               <div className={reviewedRange.alerts.some((alert) => alert.kind !== 'hours') ? 'schedule-step warn' : 'schedule-step good'}>
                 <span>3</span>
                 <strong>Review & Publish</strong>
                 <p>{reviewedRange.alerts.some((alert) => alert.kind !== 'hours') ? 'Resolve conflicts before publish' : 'Ready to publish or export'}</p>
+              </div>
+            </div>
+            <div className="quick-add-panel">
+              <div className="panel-header compact">
+                <div>
+                  <h3>Quick add a shift</h3>
+                  <p className="muted">Choose a day, then tap a reusable template.</p>
+                </div>
+              </div>
+              <div className="form-inline">
+                <Field label="Day">
+                  <select value={requirementDraft.day} onChange={(event) => setRequirementDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
+                    {DAYS.map((day) => (
+                      <option key={day} value={day}>
+                        {dayFullLabel(day)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <button className="ghost-button" onClick={() => goToSection('setup')}>
+                  Edit templates
+                </button>
+              </div>
+              <div className="preset-row">
+                {activeShiftTemplates.map((template) => (
+                  <button key={template.id} className="ghost-button small" onClick={() => addRequirementFromTemplate(template)}>
+                    {template.label} {template.start}-{template.end}
+                  </button>
+                ))}
               </div>
             </div>
           </article>
@@ -1293,108 +1662,6 @@ export default function Page() {
             {lastGeneratedAt && <p className="sync-line">Last refreshed {new Date(lastGeneratedAt).toLocaleString()}</p>}
           </article>
 
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Business hours</p>
-                <h2>Hours of operation</h2>
-              </div>
-            </div>
-            <div className="form-inline">
-              <select value={businessHoursDraft.day} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
-                {DAYS.map((day) => (
-                  <option key={day} value={day}>
-                    {dayFullLabel(day)}
-                  </option>
-                ))}
-              </select>
-              <input type="time" value={businessHoursDraft.start} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, start: event.target.value }))} />
-              <input type="time" value={businessHoursDraft.end} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, end: event.target.value }))} />
-              <button className="primary-button" onClick={addBusinessHours}>
-                Set day hours
-              </button>
-            </div>
-            <div className="stack">
-              {DAYS.map((day) => {
-                const rule = state.businessHours.find((entry) => entry.day === day);
-                return (
-                  <div key={day} className="day-row">
-                    <div>
-                      <strong>{dayFullLabel(day)}</strong>
-                      <p className="muted">
-                        {rule?.ranges.length
-                          ? rule.ranges.map((range) => formatRange(range.start, range.end)).join(', ')
-                          : 'Closed'}
-                      </p>
-                    </div>
-                    <div className="row-actions">
-                      {(rule?.ranges ?? []).map((range, index) => (
-                        <button key={`${day}-${index}`} className="ghost-button small" onClick={() => deleteBusinessHours(day, index)}>
-                          Remove
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Staffing requirements</p>
-                <h2>Coverage by time block</h2>
-              </div>
-            </div>
-            <div className="form-grid narrow">
-              <Field label="Day">
-                <select value={requirementDraft.day} onChange={(event) => setRequirementDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
-                  {DAYS.map((day) => (
-                    <option key={day} value={day}>
-                      {dayFullLabel(day)}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Start">
-                <input type="time" value={requirementDraft.start} onChange={(event) => setRequirementDraft((current) => ({ ...current, start: event.target.value }))} />
-              </Field>
-              <Field label="End">
-                <input type="time" value={requirementDraft.end} onChange={(event) => setRequirementDraft((current) => ({ ...current, end: event.target.value }))} />
-              </Field>
-              <Field label="Required staff">
-                <input type="number" min="1" step="1" value={requirementDraft.requiredStaff} onChange={(event) => setRequirementDraft((current) => ({ ...current, requiredStaff: Number(event.target.value) }))} />
-              </Field>
-              <Field label="Role">
-                <input value={requirementDraft.role} onChange={(event) => setRequirementDraft((current) => ({ ...current, role: event.target.value }))} />
-              </Field>
-              <Field label="Notes">
-                <input value={requirementDraft.notes} onChange={(event) => setRequirementDraft((current) => ({ ...current, notes: event.target.value }))} />
-              </Field>
-            </div>
-            <button className="primary-button" onClick={addRequirement}>
-              Add staffing block
-            </button>
-            <div className="spacer" />
-            <div className="scroll-list">
-              {buildSortedRequirements(state.staffingRequirements).map((requirement) => (
-                <div key={requirement.id} className="requirement-row">
-                  <div>
-                    <strong>{dayFullLabel(requirement.day)}</strong>
-                    <p className="muted">
-                      {formatRange(requirement.start, requirement.end)} • {requirement.requiredStaff} staff
-                    </p>
-                    <p className="muted">{requirement.role || 'General coverage'}</p>
-                  </div>
-                  <button className="ghost-button small" onClick={() => deleteRequirement(requirement.id)}>
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          </article>
-
           <article className="panel review-area">
             <div className="panel-header">
               <div>
@@ -1405,8 +1672,8 @@ export default function Page() {
             </div>
             <div className="print-summary">
               <div>
-                <strong>{formatCurrency(reviewedRange.totalCost)}</strong>
-                <p className="muted">Projected labor cost for the selected period</p>
+                <strong>{totalAssignedHours.toFixed(1)} hrs</strong>
+                <p className="muted">Projected scheduled hours for the selected period</p>
               </div>
               <div>
                 <strong>{totalAlerts}</strong>
@@ -1421,15 +1688,15 @@ export default function Page() {
                       <h3>{formatWeekLabel(week.weekStart, week.weekEnd)}</h3>
                       <p className="muted">Tap into any day to see every assigned shift and employee.</p>
                     </div>
-                    <span className="status-pill">{formatCurrency(week.schedule.totalCost)}</span>
+                    <span className="status-pill">{week.schedule.totalHours.toFixed(1)} hrs</span>
                   </div>
                   <div className="calendar-grid">
-                    {dayCards.map(({ day, requirements, dayAssignments, dayCost }) => (
+                    {dayCards.map(({ day, requirements, dayAssignments, dayHours }) => (
                       <div key={day} className="day-card">
                         <div className="day-card-header">
                           <strong>{formatDayDate(addDays(week.weekStart, DAYS.indexOf(day)))}</strong>
                           <span className="muted">
-                            {dayAssignments.length} shifts • {formatCurrency(dayCost)}
+                            {dayAssignments.length} shifts • {dayHours.toFixed(1)} hrs
                           </span>
                         </div>
                         {requirements.length ? (
@@ -1444,7 +1711,7 @@ export default function Page() {
                                     <strong>{formatRange(requirement.start, requirement.end)}</strong>
                                     <span className="status-pill">{requirement.requiredStaff} needed</span>
                                   </div>
-                                  <p className="muted">{requirement.role || 'General coverage'}</p>
+                                  <p className="muted">{requirement.notes || 'General coverage'}</p>
                                   <div className="assigned-line">
                                     {assignments.length ? (
                                       assignments.map((assignment) => (
@@ -1510,35 +1777,35 @@ export default function Page() {
             />
           </article>
 
-          <article className="panel">
+          <article className="panel schedule-summary">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Cost summary</p>
-                <h2>Labor spend</h2>
+                <p className="eyebrow">Hours summary</p>
+                <h2>Work load</h2>
               </div>
-              <strong className="cost-large">{formatCurrency(reviewedRange.totalCost)}</strong>
+              <strong className="hours-large">{totalAssignedHours.toFixed(1)} hrs</strong>
             </div>
             <div className="stack">
               {reviewedRange.weeks.map((week) => (
                 <div key={week.weekStart.toISOString()} className="day-row">
                   <strong>{formatWeekLabel(week.weekStart, week.weekEnd)}</strong>
-                  <span>{formatCurrency(week.schedule.totalCost)}</span>
+                  <span>{week.schedule.totalHours.toFixed(1)} hrs</span>
                 </div>
               ))}
             </div>
             <div className="spacer" />
             <div className="scroll-list">
               {employeeRows.map((employee) => (
-                <div key={employee.id} className="employee-cost-row">
+                <div key={employee.id} className="employee-hours-row">
                   <div>
                     <strong>{employee.name}</strong>
                     <p className="muted">
-                      {employee.hours.toFixed(1)} hrs • {employee.role}
+                      {employee.hours.toFixed(1)} hrs
                     </p>
                   </div>
                   <div className="right-align">
-                    <strong>{formatCurrency(employee.cost)}</strong>
-                    <p className="muted">{formatCurrency(employee.hourlyWage)}/hr</p>
+                    <strong>{employee.hours.toFixed(1)} hrs</strong>
+                    <p className="muted">Priority {employee.priorityLevel}</p>
                   </div>
                 </div>
               ))}
@@ -1567,6 +1834,7 @@ export default function Page() {
         <UserGuide
           onOpenEmployees={() => goToSection('employees')}
           onOpenAvailability={() => goToSection('availability')}
+          onOpenSetup={() => goToSection('setup')}
           onOpenSchedules={() => goToSection('schedules')}
           onOpenDashboard={() => goToSection('dashboard')}
           onOpenDrive={() => setShowDriveMenu(true)}
@@ -1755,12 +2023,14 @@ function PrintableScheduleCalendar({
 function UserGuide({
   onOpenEmployees,
   onOpenAvailability,
+  onOpenSetup,
   onOpenSchedules,
   onOpenDashboard,
   onOpenDrive,
 }: {
   onOpenEmployees: () => void;
   onOpenAvailability: () => void;
+  onOpenSetup: () => void;
   onOpenSchedules: () => void;
   onOpenDashboard: () => void;
   onOpenDrive: () => void;
@@ -1779,8 +2049,8 @@ function UserGuide({
           <span className="guide-number">1</span>
           <div>
             <h3>Add employees</h3>
-            <p>
-              Open Employees and enter each person&apos;s name, role, hourly wage, preferred hours, maximum hours, and priority level.
+              <p>
+              Open Employees and enter each person&apos;s name, preferred hours, maximum hours, and priority level.
               Higher priority employees are considered first when the schedule is generated.
             </p>
             <button className="ghost-button" onClick={onOpenEmployees}>Open Employees</button>
@@ -1792,8 +2062,8 @@ function UserGuide({
           <div>
             <h3>Enter availability</h3>
             <p>
-              Open Availability, choose the employee, choose the period, then add the days and times that person can work. Use unavailable
-              hours for recurring conflicts, and use date-specific exceptions for one-time changes.
+              Open Availability, choose the employee, then add the days and times that person can work each week. Keep this screen simple:
+              select the day, enter the times, and save the weekly hours.
             </p>
             <button className="ghost-button" onClick={onOpenAvailability}>Open Availability</button>
           </div>
@@ -1802,12 +2072,12 @@ function UserGuide({
         <article className="guide-section">
           <span className="guide-number">3</span>
           <div>
-            <h3>Set business needs</h3>
+            <h3>Set business hours and templates</h3>
             <p>
-              Open Schedules and set the business hours and staffing requirements. A staffing requirement is the number of people needed
-              for a specific day and time block.
+              Open Setup to define the business hours and reusable shift templates. This is where you make the common shifts that you
+              can add quickly later.
             </p>
-            <button className="ghost-button" onClick={onOpenSchedules}>Open Schedules</button>
+            <button className="ghost-button" onClick={onOpenSetup}>Open Setup</button>
           </div>
         </article>
 
@@ -1816,8 +2086,8 @@ function UserGuide({
           <div>
             <h3>Generate and review</h3>
             <p>
-              Tap Generate Schedule. The app checks availability, business hours, employee max hours, and priority. Review every slot in
-              the calendar. If needed, use the slot dropdowns to swap an employee or mark a slot unassigned.
+              Tap Generate Schedule. Then use the quick-add shift buttons, review every slot in the calendar, and swap or clear any
+              assignment before publishing.
             </p>
           </div>
         </article>

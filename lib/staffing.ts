@@ -23,8 +23,6 @@ export type DateException = {
 export type Employee = {
   id: string;
   name: string;
-  role: string;
-  hourlyWage: number;
   minPreferredWeeklyHours: number;
   maxAllowedWeeklyHours: number;
   priorityLevel: number;
@@ -40,6 +38,15 @@ export type EmployeeAvailability = {
 
 export type BusinessHours = WeeklyRule;
 
+export type ShiftTemplate = {
+  id: string;
+  label: string;
+  start: string;
+  end: string;
+  requiredStaff: number;
+  notes?: string;
+};
+
 export type StaffingRequirement = {
   id: string;
   day: DayKey;
@@ -54,6 +61,7 @@ export type AppState = {
   employees: Employee[];
   availability: Record<string, EmployeeAvailability>;
   businessHours: BusinessHours[];
+  shiftTemplates: ShiftTemplate[];
   staffingRequirements: StaffingRequirement[];
   scheduleOverrides: Record<string, string | null>;
   schedulePublishedAt: string | null;
@@ -70,8 +78,6 @@ export type ScheduleAssignment = {
   employeeId: string;
   employeeName: string;
   role: string;
-  hourlyWage: number;
-  cost: number;
   blockId: string;
   requiredStaff: number;
 };
@@ -88,9 +94,8 @@ export type GeneratedSchedule = {
   assignments: ScheduleAssignment[];
   alerts: ScheduleAlert[];
   employeeHours: Record<string, number>;
-  employeeCost: Record<string, number>;
-  dayCost: Record<DayKey, number>;
-  totalCost: number;
+  dayHours: Record<DayKey, number>;
+  totalHours: number;
   daySummaries: Record<
     DayKey,
     {
@@ -157,14 +162,6 @@ export function durationHours(start: string, end: string) {
     return 0;
   }
   return (endMinutes - startMinutes) / 60;
-}
-
-export function formatCurrency(amount: number) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 0,
-  }).format(amount);
 }
 
 export function isoDateForWeekDay(weekStart: Date, day: DayKey) {
@@ -278,7 +275,6 @@ export function validateState(state: AppState) {
 
   state.employees.forEach((employee) => {
     if (!employee.name.trim()) warnings.push(`Employee ${employee.id} is missing a name.`);
-    if (employee.hourlyWage <= 0) warnings.push(`${employee.name || employee.id} has an invalid hourly wage.`);
     if (employee.minPreferredWeeklyHours < 0 || employee.maxAllowedWeeklyHours < 0) {
       warnings.push(`${employee.name || employee.id} has negative hour limits.`);
     }
@@ -314,8 +310,7 @@ export function generateSchedule(state: AppState, weekStart: Date): GeneratedSch
   const assignments: ScheduleAssignment[] = [];
   const alerts: ScheduleAlert[] = [];
   const employeeHours: Record<string, number> = {};
-  const employeeCost: Record<string, number> = {};
-  const dayCost = DAYS.reduce((acc, day) => {
+  const dayHours = DAYS.reduce((acc, day) => {
     acc[day] = 0;
     return acc;
   }, {} as Record<DayKey, number>);
@@ -390,10 +385,8 @@ export function generateSchedule(state: AppState, weekStart: Date): GeneratedSch
 
     picks.forEach((pick, slotIndex) => {
       const hours = employeeHours[pick.employee.id] ?? 0;
-      const cost = blockHours * pick.employee.hourlyWage;
       employeeHours[pick.employee.id] = hours + blockHours;
-      employeeCost[pick.employee.id] = (employeeCost[pick.employee.id] ?? 0) + cost;
-      dayCost[requirement.day] += cost;
+      dayHours[requirement.day] += blockHours;
       daySummaries[requirement.day].totalAssigned += 1;
 
       assignments.push({
@@ -405,9 +398,7 @@ export function generateSchedule(state: AppState, weekStart: Date): GeneratedSch
         end: requirement.end,
         employeeId: pick.employee.id,
         employeeName: pick.employee.name,
-        role: pick.employee.role,
-        hourlyWage: pick.employee.hourlyWage,
-        cost,
+        role: requirement.role ?? '',
         blockId: requirement.id,
         requiredStaff: requirement.requiredStaff,
       });
@@ -442,15 +433,14 @@ export function generateSchedule(state: AppState, weekStart: Date): GeneratedSch
     }
   });
 
-  const totalCost = Object.values(employeeCost).reduce((sum, value) => sum + value, 0);
+  const totalHours = Object.values(employeeHours).reduce((sum, value) => sum + value, 0);
 
   return {
     assignments,
     alerts,
     employeeHours,
-    employeeCost,
-    dayCost,
-    totalCost,
+    dayHours,
+    totalHours,
     daySummaries,
   };
 }
@@ -463,8 +453,7 @@ export type GeneratedScheduleRange = {
   }>;
   alerts: ScheduleAlert[];
   employeeHours: Record<string, number>;
-  employeeCost: Record<string, number>;
-  totalCost: number;
+  totalHours: number;
 };
 
 export type ScheduleFeasibilityIssue = {
@@ -574,8 +563,7 @@ function candidateScore(employee: Employee, hoursSoFar: number) {
   const priorityBoost = employee.priorityLevel * 100;
   const deficitBoost = minGap > 0 ? 1000 + minGap * 60 : 0;
   const loadPenalty = hoursSoFar * 15;
-  const wagePenalty = employee.hourlyWage * 0.5;
-  return priorityBoost + deficitBoost - loadPenalty - wagePenalty;
+  return priorityBoost + deficitBoost - loadPenalty;
 }
 
 function canEmployeeCoverRequirement(
@@ -608,7 +596,7 @@ function eligibleEmployeesForRequirement(
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
       if (b.employee.priorityLevel !== a.employee.priorityLevel) return b.employee.priorityLevel - a.employee.priorityLevel;
-      return a.employee.hourlyWage - b.employee.hourlyWage;
+      return a.employee.name.localeCompare(b.employee.name);
     });
 }
 
@@ -619,7 +607,7 @@ function chooseBestEmployeeSet(
   const sorted = [...candidates].sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     if (b.employee.priorityLevel !== a.employee.priorityLevel) return b.employee.priorityLevel - a.employee.priorityLevel;
-    return a.employee.hourlyWage - b.employee.hourlyWage;
+    return a.employee.name.localeCompare(b.employee.name);
   });
 
   let best: Array<{ employee: Employee; score: number }> = [];
@@ -738,7 +726,7 @@ export function checkScheduleFeasibility(state: AppState, startDate: Date, endDa
     issues.push({
       kind: 'capacity',
       severity: 'blocking',
-      message: `The requested period needs about ${totalRequiredHours.toFixed(1)} labor hours, but the current employee pool can cover only about ${estimatedCapacityHours.toFixed(1)} hours.`,
+      message: `The requested period needs about ${totalRequiredHours.toFixed(1)} scheduled hours, but the current employee pool can cover only about ${estimatedCapacityHours.toFixed(1)} hours.`,
     });
   }
 
@@ -759,8 +747,7 @@ export function generateScheduleRange(state: AppState, startDate: Date, endDate:
   const weeks: GeneratedScheduleRange['weeks'] = [];
   const alerts: ScheduleAlert[] = [];
   const employeeHours: Record<string, number> = {};
-  const employeeCost: Record<string, number> = {};
-  let totalCost = 0;
+  let totalHours = 0;
 
   let cursor = start;
   while (cursor <= end) {
@@ -771,14 +758,10 @@ export function generateScheduleRange(state: AppState, startDate: Date, endDate:
       schedule,
     });
     alerts.push(...schedule.alerts);
-    totalCost += schedule.totalCost;
+    totalHours += schedule.totalHours;
 
     for (const [employeeId, hours] of Object.entries(schedule.employeeHours)) {
       employeeHours[employeeId] = (employeeHours[employeeId] ?? 0) + hours;
-    }
-
-    for (const [employeeId, cost] of Object.entries(schedule.employeeCost)) {
-      employeeCost[employeeId] = (employeeCost[employeeId] ?? 0) + cost;
     }
 
     cursor = addDays(cursor, 7);
@@ -788,8 +771,7 @@ export function generateScheduleRange(state: AppState, startDate: Date, endDate:
     weeks,
     alerts,
     employeeHours,
-    employeeCost,
-    totalCost,
+    totalHours,
   };
 }
 
@@ -838,8 +820,7 @@ export function applyScheduleOverrides(
   const reviewState = {
     scheduledBlocks: [] as Array<{ employeeId: string; day: DayKey; start: string; end: string }>,
     employeeHours: {} as Record<string, number>,
-    employeeCost: {} as Record<string, number>,
-    dayCost: DAYS.reduce((acc, day) => {
+    dayHours: DAYS.reduce((acc, day) => {
       acc[day] = 0;
       return acc;
     }, {} as Record<DayKey, number>),
@@ -932,17 +913,14 @@ export function applyScheduleOverrides(
         end: block.end,
         employeeId: finalEmployee.id,
         employeeName: finalEmployee.name,
-        role: finalEmployee.role,
-        hourlyWage: finalEmployee.hourlyWage,
-        cost: blockHours * finalEmployee.hourlyWage,
+        role: block.role ?? '',
         blockId: block.id,
         requiredStaff: block.requiredStaff,
       } satisfies ScheduleAssignment;
 
       reviewState.assignments.push(assignment);
       reviewState.employeeHours[finalEmployee.id] = hoursSoFar + blockHours;
-      reviewState.employeeCost[finalEmployee.id] = (reviewState.employeeCost[finalEmployee.id] ?? 0) + assignment.cost;
-      reviewState.dayCost[block.day] += assignment.cost;
+      reviewState.dayHours[block.day] += blockHours;
       reviewState.daySummaries[block.day].totalAssigned += 1;
       reviewState.scheduledBlocks.push({
         employeeId: finalEmployee.id,
@@ -976,7 +954,7 @@ export function applyScheduleOverrides(
     }
   });
 
-  const totalCost = Object.values(reviewState.employeeCost).reduce((sum, value) => sum + value, 0);
+  const totalHours = Object.values(reviewState.employeeHours).reduce((sum, value) => sum + value, 0);
 
   return {
     assignments: reviewState.assignments.sort((a, b) => {
@@ -987,9 +965,8 @@ export function applyScheduleOverrides(
     }),
     alerts: reviewState.alerts,
     employeeHours: reviewState.employeeHours,
-    employeeCost: reviewState.employeeCost,
-    dayCost: reviewState.dayCost,
-    totalCost,
+    dayHours: reviewState.dayHours,
+    totalHours,
     daySummaries: reviewState.daySummaries,
   };
 }
@@ -1002,19 +979,14 @@ export function reviewScheduleRange(range: GeneratedScheduleRange, state: AppSta
 
   const alerts: ScheduleAlert[] = [];
   const employeeHours: Record<string, number> = {};
-  const employeeCost: Record<string, number> = {};
-  let totalCost = 0;
+  let totalHours = 0;
 
   weeks.forEach((week) => {
     alerts.push(...week.schedule.alerts);
-    totalCost += week.schedule.totalCost;
+    totalHours += week.schedule.totalHours;
 
     Object.entries(week.schedule.employeeHours).forEach(([employeeId, hours]) => {
       employeeHours[employeeId] = (employeeHours[employeeId] ?? 0) + hours;
-    });
-
-    Object.entries(week.schedule.employeeCost).forEach(([employeeId, cost]) => {
-      employeeCost[employeeId] = (employeeCost[employeeId] ?? 0) + cost;
     });
   });
 
@@ -1022,7 +994,6 @@ export function reviewScheduleRange(range: GeneratedScheduleRange, state: AppSta
     weeks,
     alerts,
     employeeHours,
-    employeeCost,
-    totalCost,
+    totalHours,
   };
 }

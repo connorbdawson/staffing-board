@@ -16,8 +16,6 @@ function employee(overrides: Partial<Employee> & Pick<Employee, 'id' | 'name'>):
   return {
     id: overrides.id,
     name: overrides.name,
-    role: overrides.role ?? 'Team Member',
-    hourlyWage: overrides.hourlyWage ?? 18,
     minPreferredWeeklyHours: overrides.minPreferredWeeklyHours ?? 0,
     maxAllowedWeeklyHours: overrides.maxAllowedWeeklyHours ?? 40,
     priorityLevel: overrides.priorityLevel ?? 3,
@@ -50,6 +48,7 @@ function baseState(overrides: Partial<AppState> = {}): AppState {
         { day: 'sun', ranges: [] },
       ] as AppState['businessHours']),
     staffingRequirements: overrides.staffingRequirements ?? [],
+    shiftTemplates: overrides.shiftTemplates ?? [],
     scheduleOverrides: overrides.scheduleOverrides ?? {},
     schedulePublishedAt: overrides.schedulePublishedAt ?? null,
     updatedAt: overrides.updatedAt ?? new Date().toISOString(),
@@ -124,9 +123,9 @@ test('canWorkBlock respects weekly unavailability and full date exceptions', () 
 });
 
 test('generateSchedule fills a requirement with available employees and keeps priority ordering', () => {
-  const high = employee({ id: 'emp-1', name: 'Ava', priorityLevel: 5, minPreferredWeeklyHours: 4, maxAllowedWeeklyHours: 8, hourlyWage: 20 });
-  const medium = employee({ id: 'emp-2', name: 'Ben', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 8, hourlyWage: 18 });
-  const low = employee({ id: 'emp-3', name: 'Chloe', priorityLevel: 1, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 8, hourlyWage: 16 });
+  const high = employee({ id: 'emp-1', name: 'Ava', priorityLevel: 5, minPreferredWeeklyHours: 4, maxAllowedWeeklyHours: 8 });
+  const medium = employee({ id: 'emp-2', name: 'Ben', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 8 });
+  const low = employee({ id: 'emp-3', name: 'Chloe', priorityLevel: 1, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 8 });
 
   const state = baseState({
     employees: [high, medium, low],
@@ -163,8 +162,8 @@ test('generateSchedule fills a requirement with available employees and keeps pr
 });
 
 test('generateSchedule respects max weekly hours and shifts later blocks to another employee', () => {
-  const capped = employee({ id: 'emp-1', name: 'Jordan', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4, hourlyWage: 22 });
-  const backup = employee({ id: 'emp-2', name: 'Riley', priorityLevel: 1, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 40, hourlyWage: 17 });
+  const capped = employee({ id: 'emp-1', name: 'Jordan', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4 });
+  const backup = employee({ id: 'emp-2', name: 'Riley', priorityLevel: 1, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 40 });
 
   const state = baseState({
     employees: [capped, backup],
@@ -201,8 +200,8 @@ test('generateSchedule respects max weekly hours and shifts later blocks to anot
 });
 
 test('generateSchedule covers the most constrained shift first so later blocks still get staffed', () => {
-  const flexible = employee({ id: 'emp-1', name: 'Casey', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4, hourlyWage: 21 });
-  const constrained = employee({ id: 'emp-2', name: 'Jules', priorityLevel: 1, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 40, hourlyWage: 16 });
+  const flexible = employee({ id: 'emp-1', name: 'Casey', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4 });
+  const constrained = employee({ id: 'emp-2', name: 'Jules', priorityLevel: 1, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 40 });
 
   const state = baseState({
     employees: [flexible, constrained],
@@ -236,7 +235,7 @@ test('generateSchedule covers the most constrained shift first so later blocks s
 });
 
 test('generateSchedule flags understaffing when no eligible employee remains', () => {
-  const emp = employee({ id: 'emp-1', name: 'Morgan', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4, hourlyWage: 20 });
+  const emp = employee({ id: 'emp-1', name: 'Morgan', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4 });
   const state = baseState({
     employees: [emp],
     availability: {
@@ -258,7 +257,7 @@ test('generateSchedule flags understaffing when no eligible employee remains', (
 });
 
 test('generateScheduleRange returns one generated week per requested week span', () => {
-  const emp = employee({ id: 'emp-1', name: 'Sam', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 40, hourlyWage: 18 });
+  const emp = employee({ id: 'emp-1', name: 'Sam', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 40 });
   const state = baseState({
     employees: [emp],
     availability: {
@@ -276,12 +275,12 @@ test('generateScheduleRange returns one generated week per requested week span',
   const range = generateScheduleRange(state, new Date('2026-04-20T12:00:00'), new Date('2026-05-03T12:00:00'));
 
   assert.equal(range.weeks.length, 2);
-  assert.equal(range.totalCost, 144);
+  assert.equal(range.totalHours, 8);
   assert.equal(range.employeeHours[emp.id], 8);
 });
 
 test('checkScheduleFeasibility flags impossible coverage before generation', () => {
-  const emp = employee({ id: 'emp-1', name: 'Alex', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4, hourlyWage: 20 });
+  const emp = employee({ id: 'emp-1', name: 'Alex', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 4 });
   const state = baseState({
     employees: [emp],
     availability: {
@@ -308,8 +307,8 @@ test('checkScheduleFeasibility flags impossible coverage before generation', () 
 });
 
 test('checkScheduleFeasibility accepts a fully covered schedule', () => {
-  const first = employee({ id: 'emp-1', name: 'Lena', priorityLevel: 4, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20, hourlyWage: 18 });
-  const second = employee({ id: 'emp-2', name: 'Noah', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20, hourlyWage: 17 });
+  const first = employee({ id: 'emp-1', name: 'Lena', priorityLevel: 4, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20 });
+  const second = employee({ id: 'emp-2', name: 'Noah', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20 });
   const state = baseState({
     employees: [first, second],
     availability: {
@@ -336,8 +335,8 @@ test('checkScheduleFeasibility accepts a fully covered schedule', () => {
 });
 
 test('applyScheduleOverrides lets the owner swap or clear a generated shift before publish', () => {
-  const high = employee({ id: 'emp-1', name: 'Ava', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20, hourlyWage: 20 });
-  const backup = employee({ id: 'emp-2', name: 'Ben', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20, hourlyWage: 18 });
+  const high = employee({ id: 'emp-1', name: 'Ava', priorityLevel: 5, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20 });
+  const backup = employee({ id: 'emp-2', name: 'Ben', priorityLevel: 3, minPreferredWeeklyHours: 0, maxAllowedWeeklyHours: 20 });
   const state = baseState({
     employees: [high, backup],
     availability: {

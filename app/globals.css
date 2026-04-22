@@ -209,9 +209,15 @@ h3 {
   justify-content: flex-end;
 }
 
+.topbar-search-wrap {
+  position: relative;
+  min-width: 300px;
+  flex: 1 1 320px;
+}
+
 .topbar-search {
-  min-width: 260px;
-  flex: 1 1 260px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .topbar-search input {
@@ -220,6 +226,42 @@ h3 {
   border-radius: 999px;
   padding-inline: 18px;
   background: rgba(248, 250, 252, 0.95);
+}
+
+.search-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.search-result {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.68);
+  padding: 12px 14px;
+  text-align: left;
+}
+
+.search-result strong,
+.search-result small {
+  display: block;
+}
+
+.search-result small {
+  color: var(--muted);
+  margin-top: 4px;
 }
 
 .topbar-badge {
@@ -291,7 +333,7 @@ h3 {
 }
 
 .metric strong,
-.cost-large {
+.hours-large {
   font-size: 1.55rem;
   letter-spacing: 0;
 }
@@ -442,7 +484,7 @@ textarea {
   order: 2;
 }
 
-.schedule-grid > .cost-summary {
+.schedule-grid > .schedule-summary {
   grid-column: 2;
   order: 3;
 }
@@ -558,7 +600,7 @@ textarea {
 .employee-row,
 .requirement-row,
 .rule-row,
-.employee-cost-row,
+.employee-hours-row,
 .day-row {
   display: flex;
   justify-content: space-between;
@@ -642,6 +684,23 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.quick-add-panel {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  display: grid;
+  gap: 12px;
 }
 
 .key-list,
@@ -892,7 +951,7 @@ textarea {
   font-weight: 700;
 }
 
-.cost-large {
+.hours-large {
   display: inline-block;
 }
 
@@ -1119,7 +1178,7 @@ textarea {
   line-height: 1.55;
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 1280px) {
   .app-shell {
     grid-template-columns: 1fr;
   }
@@ -1127,6 +1186,14 @@ textarea {
   .sidebar {
     position: relative;
     top: auto;
+  }
+
+  .sidebar-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sidebar-footer {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .summary-strip,
@@ -1142,7 +1209,7 @@ textarea {
 
   .schedule-grid > .schedule-command,
   .schedule-grid > .review-area,
-  .schedule-grid > .cost-summary,
+  .schedule-grid > .schedule-summary,
   .schedule-grid > .alerts-panel,
   .schedule-grid > .printable-area {
     grid-column: 1 / -1;
@@ -1163,6 +1230,17 @@ textarea {
     min-width: 0;
   }
 
+  .topbar-search-wrap {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .search-dropdown {
+    position: static;
+    margin-top: 10px;
+    max-height: 320px;
+  }
+
   .topbar-actions {
     width: 100%;
   }
@@ -1180,7 +1258,7 @@ textarea {
   .employee-row,
   .requirement-row,
   .rule-row,
-  .employee-cost-row,
+  .employee-hours-row,
   .day-row,
   .calendar-block-top,
   .panel-header {
@@ -1236,6 +1314,7 @@ textarea {
   }
 
   .topbar,
+  .sidebar,
   .summary-strip,
   .action-launcher,
   .section-nav,
@@ -1243,6 +1322,7 @@ textarea {
   .dashboard-grid,
   .home-workspace,
   .review-area,
+  .app-main > *:not(.printable-area),
   .panel-grid > :not(.printable-area) {
     display: none !important;
   }
@@ -1250,6 +1330,11 @@ textarea {
   .shell {
     max-width: none;
     padding: 0;
+  }
+
+  .app-shell,
+  .app-main {
+    display: block;
   }
 
   .panel,
