@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { cloneElement, isValidElement, useEffect, useMemo, useState, type Dispatch, type ReactElement, type ReactNode, type SetStateAction } from 'react';
 import {
   DAYS,
   addDays,
@@ -10,6 +10,7 @@ import {
   scheduleAssignmentKey,
   generateScheduleRange,
   checkScheduleFeasibility,
+  canWorkBlock,
   reviewScheduleRange,
   parseTime,
   uuid,
@@ -20,6 +21,7 @@ import {
   type DayKey,
   type Employee,
   type EmployeeAvailability,
+  type GeneratedSchedule,
   type GeneratedScheduleRange,
   type ShiftTemplate,
   type StaffingRequirement,
@@ -39,12 +41,12 @@ type PeriodMode = 'thisWeek' | 'nextWeek' | 'twoWeeks' | 'custom';
 
 const SECTION_LABELS: Record<Section, string> = {
   home: 'Home',
-  dashboard: 'Dashboard',
-  employees: 'Employees',
+  dashboard: 'Week Summary',
+  employees: 'People',
   availability: 'Availability',
-  setup: 'Setup',
-  schedules: 'Schedules',
-  guide: 'User Guide',
+  setup: 'Shifts',
+  schedules: 'Schedule',
+  guide: 'Guide',
 };
 
 const WORKSPACE_SECTIONS: Section[] = ['home', 'schedules', 'setup', 'availability', 'employees', 'dashboard', 'guide'];
@@ -228,6 +230,22 @@ const DEFAULT_SHIFT_TEMPLATES: Array<Pick<ShiftTemplate, 'label' | 'start' | 'en
   { label: 'Full day', start: '08:00', end: '17:00', requiredStaff: 1 },
 ];
 
+const SURFACE_CARD = 'rounded-[28px] border border-slate-200/80 bg-white/90 shadow-sm';
+const SURFACE_CARD_PAD = `${SURFACE_CARD} p-6`;
+const SURFACE_TILE = 'rounded-[24px] border border-slate-200/80 bg-white/90 p-5 shadow-sm transition duration-200 hover:-translate-y-1 hover:shadow-xl';
+const SURFACE_SOFT = 'rounded-[20px] border border-slate-200 bg-slate-50 p-4 ring-1 ring-slate-200';
+const SURFACE_BUTTON = 'inline-flex min-h-12 items-center justify-center rounded-2xl px-5 py-3 text-sm font-semibold shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+const SURFACE_BUTTON_PRIMARY = `${SURFACE_BUTTON} bg-blue-600 text-white hover:bg-blue-500`;
+const SURFACE_BUTTON_SECONDARY = `${SURFACE_BUTTON} border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50`;
+const SURFACE_BUTTON_MUTED = `${SURFACE_BUTTON} border border-slate-200 bg-slate-50 text-slate-700 hover:border-blue-200 hover:bg-white`;
+const INLINE_CARD = 'rounded-[20px] border border-slate-200 bg-slate-50 p-4 ring-1 ring-slate-200';
+const INLINE_CARD_EMPHASIS = 'rounded-[20px] border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-800';
+const INLINE_BUTTON = 'rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+const INLINE_BUTTON_MUTED = 'rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+const INLINE_BUTTON_PRIMARY = 'rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-blue-500 hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+const INLINE_BUTTON_SUCCESS = 'rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-300 hover:bg-emerald-100 hover:shadow-lg focus-visible:ring-2 focus-visible:ring-emerald-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+const CHOICE_PILL = 'rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+
 function sectionHref(section: Section) {
   return `#${section}`;
 }
@@ -303,12 +321,12 @@ function buildSmartSearchSuggestions(args: {
 
   const sectionLookup: Array<{ id: string; label: string; detail: string; section: Section; keywords: string[] }> = [
     { id: 'section-home', label: 'Home', detail: 'Owner workspace', section: 'home', keywords: ['home', 'dashboard'] },
-    { id: 'section-dashboard', label: 'Dashboard', detail: 'Quick totals', section: 'dashboard', keywords: ['dashboard', 'totals', 'summary'] },
-    { id: 'section-employees', label: 'Employees', detail: 'People and hours', section: 'employees', keywords: ['employee', 'employees', 'people', 'team'] },
+    { id: 'section-dashboard', label: 'Week Summary', detail: 'Quick totals', section: 'dashboard', keywords: ['dashboard', 'totals', 'summary'] },
+    { id: 'section-employees', label: 'People', detail: 'Employee hours and notes', section: 'employees', keywords: ['employee', 'employees', 'people', 'team'] },
     { id: 'section-availability', label: 'Availability', detail: 'Weekly availability', section: 'availability', keywords: ['availability', 'available', 'unavailable', 'time off'] },
-    { id: 'section-setup', label: 'Setup', detail: 'Shift templates and business hours', section: 'setup', keywords: ['setup', 'admin', 'shift', 'template', 'hours'] },
-    { id: 'section-schedules', label: 'Schedules', detail: 'Build and publish shifts', section: 'schedules', keywords: ['schedule', 'schedules', 'shift', 'publish'] },
-    { id: 'section-guide', label: 'User Guide', detail: 'Plain-language help', section: 'guide', keywords: ['guide', 'help', 'how to'] },
+    { id: 'section-setup', label: 'Shifts', detail: 'Hours and shift patterns', section: 'setup', keywords: ['setup', 'admin', 'shift', 'template', 'hours'] },
+    { id: 'section-schedules', label: 'Schedule', detail: 'Build and review shifts', section: 'schedules', keywords: ['schedule', 'schedules', 'shift', 'publish'] },
+    { id: 'section-guide', label: 'Guide', detail: 'Plain-language help', section: 'guide', keywords: ['guide', 'help', 'how to'] },
   ];
 
   if (!queryValue) {
@@ -388,6 +406,9 @@ export default function Page() {
   const [loaded, setLoaded] = useState(false);
   const [activeSection, setActiveSection] = useState<Section>('home');
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('');
+  const [selectedScheduleEmployeeId, setSelectedScheduleEmployeeId] = useState<string>('');
+  const [selectedScheduleAssignmentId, setSelectedScheduleAssignmentId] = useState<string>('');
+  const [draggedAssignmentId, setDraggedAssignmentId] = useState<string>('');
   const [employeeDraft, setEmployeeDraft] = useState<Employee>(createEmployeeDraft());
   const [period, setPeriod] = useState(createPeriodDraft());
   const [storageStatus, setStorageStatus] = useState<'loading' | 'saved'>('loading');
@@ -447,13 +468,19 @@ export default function Page() {
   }, [selectedEmployeeId, state.employees]);
 
   useEffect(() => {
+    if (!selectedScheduleEmployeeId && state.employees[0]) {
+      setSelectedScheduleEmployeeId(state.employees[0].id);
+    }
+  }, [selectedScheduleEmployeeId, state.employees]);
+
+  useEffect(() => {
     if (!state.employees.find((employee) => employee.id === selectedEmployeeId)) return;
     const employee = state.employees.find((entry) => entry.id === selectedEmployeeId);
     if (employee) setEmployeeDraft(employee);
   }, [selectedEmployeeId, state.employees]);
 
   useEffect(() => {
-    if ('serviceWorker' in navigator) {
+    if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
       navigator.serviceWorker.register(withBasePath('/sw.js')).catch(() => {});
     }
   }, []);
@@ -507,6 +534,23 @@ export default function Page() {
         id: `template-${index}`,
         ...template,
       }));
+  const scheduleWeek = reviewedRange.weeks[0];
+  const scheduleAssignments = scheduleWeek?.schedule.assignments ?? [];
+  const scheduleDaySummaries = scheduleWeek?.schedule.daySummaries ?? DAYS.reduce(
+    (acc, day) => {
+      acc[day] = { totalRequired: 0, totalAssigned: 0, blocks: [] };
+      return acc;
+    },
+    {} as GeneratedSchedule['daySummaries'],
+  );
+  const selectedScheduleAssignment =
+    scheduleAssignments.find((assignment) => assignment.id === selectedScheduleAssignmentId) ?? scheduleAssignments[0] ?? null;
+  const selectedScheduleEmployee =
+    state.employees.find((employee) => employee.id === selectedScheduleEmployeeId) ??
+    state.employees.find((employee) => employee.id === selectedScheduleAssignment?.employeeId) ??
+    activeEmployees[0] ??
+    state.employees[0] ??
+    null;
   const totalAssignedHours = reviewedRange.totalHours;
   const totalAlerts = validationMessages.length + reviewedRange.alerts.length;
   const underfilledCount = reviewedRange.alerts.filter((alert) => alert.kind === 'understaffed').length;
@@ -519,6 +563,50 @@ export default function Page() {
       }),
     [activeShiftTemplates, searchQuery, state.employees],
   );
+
+  if (!loaded) {
+    return (
+      <main className="shell app-shell loading-shell" aria-busy="true" aria-live="polite">
+        <aside className="sidebar loading-sidebar">
+          <div className="skeleton-stack">
+            <div className="skeleton-line skeleton-line-lg" />
+            <div className="skeleton-line skeleton-line-md" />
+          </div>
+          <div className="loading-nav">
+            <div className="skeleton-chip" />
+            <div className="skeleton-chip" />
+            <div className="skeleton-chip" />
+            <div className="skeleton-chip" />
+          </div>
+        </aside>
+        <section className="app-main loading-main">
+          <div className="topbar loading-topbar">
+            <div className="skeleton-stack">
+              <div className="skeleton-line skeleton-line-xl" />
+              <div className="skeleton-line skeleton-line-sm" />
+            </div>
+            <div className="skeleton-actions">
+              <div className="skeleton-pill" />
+              <div className="skeleton-pill" />
+              <div className="skeleton-pill" />
+            </div>
+          </div>
+          <section className="summary-strip">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div key={index} className="metric skeleton-card">
+                <div className="skeleton-line skeleton-line-sm" />
+                <div className="skeleton-line skeleton-line-xl" />
+              </div>
+            ))}
+          </section>
+          <section className="panel-grid two-up">
+            <div className="panel skeleton-card" />
+            <div className="panel skeleton-card" />
+          </section>
+        </section>
+      </main>
+    );
+  }
 
   function persistNextState(nextState: AppState) {
     const publishedAt = nextState.schedulePublishedAt !== state.schedulePublishedAt ? nextState.schedulePublishedAt : null;
@@ -864,6 +952,170 @@ export default function Page() {
     setLastGeneratedAt(new Date().toISOString());
   }
 
+  function saveScheduleDraft() {
+    persistNextState(state);
+  }
+
+  function autoOptimizeSchedule() {
+    refreshSchedule();
+  }
+
+  function openScheduleCenter() {
+    goToSection('schedules');
+  }
+
+  function buildScheduleNow() {
+    refreshSchedule();
+    goToSection('schedules');
+  }
+
+  function copyLastWeek() {
+    const anchor = weekStartMonday(selectedPeriod.start);
+    const previousWeekStart = addDays(anchor, -7);
+    setPeriod({
+      mode: 'custom',
+      customStart: previousWeekStart.toISOString().slice(0, 10),
+      customEnd: addDays(previousWeekStart, 6).toISOString().slice(0, 10),
+    });
+    goToSection('schedules');
+  }
+
+  function shiftScheduleWeek(offset: number) {
+    const anchor = weekStartMonday(selectedPeriod.start);
+    const shiftedStart = addDays(anchor, offset * 7);
+    setPeriod({
+      mode: 'custom',
+      customStart: shiftedStart.toISOString().slice(0, 10),
+      customEnd: addDays(shiftedStart, 6).toISOString().slice(0, 10),
+    });
+  }
+
+  function jumpToScheduleDay(day: DayKey) {
+    setRequirementDraft((current) => ({ ...current, day }));
+    if (typeof document !== 'undefined') {
+      window.setTimeout(() => {
+        document.getElementById('schedule-quick-add')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 0);
+    }
+  }
+
+  function selectScheduleEmployee(employeeId: string) {
+    setSelectedScheduleEmployeeId(employeeId);
+    setSelectedScheduleAssignmentId('');
+  }
+
+  function selectScheduleAssignment(assignmentId: string, employeeId: string) {
+    setSelectedScheduleAssignmentId(assignmentId);
+    setSelectedScheduleEmployeeId(employeeId);
+  }
+
+  function setDraggedScheduleAssignment(assignmentId: string) {
+    setDraggedAssignmentId(assignmentId);
+  }
+
+  function moveDraggedAssignmentToEmployee(targetEmployeeId: string) {
+    if (!draggedAssignmentId) return;
+    const assignment = scheduleAssignments.find((entry) => entry.id === draggedAssignmentId);
+    if (!assignment) return;
+    setScheduleOverride(
+      scheduleAssignmentKey({
+        date: assignment.date,
+        blockId: assignment.blockId,
+        slotIndex: assignment.slotIndex,
+      }),
+      targetEmployeeId,
+    );
+    setDraggedAssignmentId('');
+  }
+
+  const currentWeekHours = reviewedRange.totalHours;
+  const openShiftCount = reviewedRange.alerts.filter((alert) => alert.kind === 'understaffed').length;
+  const conflictCount = validationMessages.length + reviewedRange.alerts.filter((alert) => alert.kind === 'validation').length;
+  const overtimeRiskEmployees = activeEmployees.filter((employee) => {
+    const hours = reviewedRange.employeeHours[employee.id] ?? 0;
+    return hours > employee.maxAllowedWeeklyHours * 0.85;
+  });
+  const overtimeRiskCount = overtimeRiskEmployees.length;
+  const activeAvailabilityCount = state.employees.filter((employee) => (state.availability[employee.id]?.weeklyAvailability.length ?? 0) > 0).length;
+  const weekHealthTone = openShiftCount || conflictCount || overtimeRiskCount ? 'warn' : 'good';
+  const weekHealthLabel = openShiftCount || conflictCount || overtimeRiskCount ? 'Needs attention' : 'Healthy week';
+  const storageLabel = storageStatus === 'saved' ? 'Saved' : 'Saving';
+  const saveDescriptor = state.schedulePublishedAt
+    ? `Published ${new Date(state.schedulePublishedAt).toLocaleString()}`
+    : `Auto-saved locally ${new Date(state.updatedAt).toLocaleString()}`;
+  const availabilityPreview = state.employees
+    .filter((employee) => (state.availability[employee.id]?.weeklyAvailability.length ?? 0) > 0)
+    .slice(0, 3)
+    .map((employee) => ({
+      id: employee.id,
+      name: employee.name,
+      blocks: state.availability[employee.id]?.weeklyAvailability.length ?? 0,
+    }));
+  const shortcutItems: Array<{
+    title: string;
+    description: string;
+    cta: string;
+    section: Section;
+    icon: 'schedule' | 'availability' | 'setup' | 'employees' | 'dashboard' | 'guide';
+  }> = [
+    {
+      title: 'Schedule',
+      description: 'Build, review, publish, and export the week.',
+      cta: 'Open schedule',
+      section: 'schedules',
+      icon: 'schedule',
+    },
+    {
+      title: 'Availability',
+      description: 'Set weekly hours for each employee.',
+      cta: 'View availability',
+      section: 'availability',
+      icon: 'availability',
+    },
+    {
+      title: 'Shifts',
+      description: 'Define hours of operation and shift templates.',
+      cta: 'Open shifts',
+      section: 'setup',
+      icon: 'setup',
+    },
+    {
+      title: 'People',
+      description: 'Manage names, limits, and priority.',
+      cta: 'Open people',
+      section: 'employees',
+      icon: 'employees',
+    },
+    {
+      title: 'Week Summary',
+      description: 'See the week at a glance and track save status.',
+      cta: 'Open summary',
+      section: 'dashboard',
+      icon: 'dashboard',
+    },
+    {
+      title: 'Guide',
+      description: 'Read the plain-language walkthrough.',
+      cta: 'Open guide',
+      section: 'guide',
+      icon: 'guide',
+    },
+  ];
+  const homeAlerts = [
+    ...reviewedRange.alerts.slice(0, 3).map((alert) => ({
+      key: alert.id,
+      label: alert.message,
+      tone: alert.kind === 'understaffed' ? 'amber' : alert.kind === 'hours' ? 'blue' : 'slate',
+    })),
+    ...(validationMessages.length
+      ? validationMessages.slice(0, 2).map((message, index) => ({
+          key: `validation-${index}`,
+          label: message,
+          tone: 'amber',
+        }))
+      : []),
+  ];
+
   function setScheduleOverride(assignmentKey: string, value: string) {
     const nextOverrides = { ...state.scheduleOverrides };
     if (value === '__inherit__') {
@@ -933,10 +1185,10 @@ export default function Page() {
         </nav>
 
         <div className="sidebar-footer">
-          <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
+          <button className="ghost-button" type="button" onClick={() => setShowDriveMenu(true)}>
             Google Drive
           </button>
-          <button className="ghost-button" onClick={clearAllData}>
+          <button className="ghost-button" type="button" onClick={clearAllData}>
             Reset to seed
           </button>
           <label className="ghost-button import-button">
@@ -955,7 +1207,9 @@ export default function Page() {
               }}
             />
           </label>
-          <p className="sync-line">{activePeriodLabel}</p>
+          <p className="sync-line" aria-live="polite">
+            {activePeriodLabel}
+          </p>
         </div>
       </aside>
 
@@ -968,11 +1222,19 @@ export default function Page() {
           </div>
           <div className="topbar-actions">
             <div className="topbar-search-wrap">
-              <label className="topbar-search" aria-label="Search">
+              <label className="topbar-search" htmlFor="owner-search">
+                <span className="sr-only">Search</span>
                 <input
+                  id="owner-search"
+                  name="search"
                   type="search"
-                  placeholder="Search employees, setup, shifts"
+                  placeholder="Search employees, setup, shifts…"
                   value={searchQuery}
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-haspopup="listbox"
+                  aria-expanded={Boolean(searchFocused && (searchQuery.trim() || searchSuggestions.length > 0))}
+                  aria-controls="owner-search-results"
                   onChange={(event) => {
                     setSearchQuery(event.target.value);
                     setSearchFocused(true);
@@ -992,12 +1254,14 @@ export default function Page() {
                 />
               </label>
               {searchFocused && (searchQuery.trim() || searchSuggestions.length > 0) && (
-                <div className="search-dropdown panel" role="listbox" aria-label="Search suggestions">
+                <div className="search-dropdown panel" id="owner-search-results" role="listbox" aria-label="Search suggestions">
                   {searchSuggestions.length ? (
                     searchSuggestions.map((suggestion) => (
                       <button
                         key={suggestion.id}
                         className="search-result"
+                        type="button"
+                        role="option"
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => selectSearchSuggestion(suggestion)}
                       >
@@ -1017,10 +1281,10 @@ export default function Page() {
             <span className="topbar-badge" aria-label="Selected period">
               {activePeriodLabel}
             </span>
-            <button className="ghost-button" aria-label="Notifications">
+            <button className="ghost-button" type="button" aria-label="Notifications">
               Notifications
             </button>
-            <button className="ghost-button" aria-label="User menu" onClick={() => setShowUserMenu((current) => !current)}>
+            <button className="ghost-button" type="button" aria-label="User menu" onClick={() => setShowUserMenu((current) => !current)}>
               JD
             </button>
           </div>
@@ -1034,18 +1298,18 @@ export default function Page() {
                   <p className="eyebrow">Account</p>
                   <h2>Owner menu</h2>
                 </div>
-                <button className="ghost-button small" onClick={() => setShowUserMenu(false)}>
+                <button className="ghost-button small" type="button" onClick={() => setShowUserMenu(false)}>
                   Close
                 </button>
               </div>
               <div className="backup-actions">
-                <button className="ghost-button" onClick={() => goToSection('dashboard')}>
-                  Open dashboard
+                <button className="ghost-button" type="button" onClick={() => goToSection('dashboard')}>
+                  Open week summary
                 </button>
-                <button className="ghost-button" onClick={() => goToSection('guide')}>
-                  Open user guide
+                <button className="ghost-button" type="button" onClick={() => goToSection('guide')}>
+                  Open guide
                 </button>
-                <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
+                <button className="ghost-button" type="button" onClick={() => setShowDriveMenu(true)}>
                   Google Drive backup
                 </button>
               </div>
@@ -1061,7 +1325,7 @@ export default function Page() {
                 <p className="eyebrow">Google Drive</p>
                 <h2>Backup and restore</h2>
               </div>
-              <button className="ghost-button small" onClick={() => setShowDriveMenu(false)}>
+              <button className="ghost-button small" type="button" onClick={() => setShowDriveMenu(false)}>
                 Close
               </button>
             </div>
@@ -1073,21 +1337,23 @@ export default function Page() {
                 Google Drive backup is not configured yet. Add <strong>NEXT_PUBLIC_GOOGLE_CLIENT_ID</strong> in your deployment settings to enable it.
               </p>
             )}
-            <p className="sync-line">
+            <p className="sync-line" aria-live="polite">
               Status: <strong>{driveStatus}</strong> {driveBackupAt ? `• Last backup ${new Date(driveBackupAt).toLocaleString()}` : ''}
             </p>
-            <p className="sync-line">{driveMessage}</p>
+            <p className="sync-line" aria-live="polite">
+              {driveMessage}
+            </p>
             <div className="backup-actions">
-              <button className="ghost-button" onClick={connectDrive} disabled={!GOOGLE_CLIENT_ID}>
+              <button className="ghost-button" type="button" onClick={connectDrive} disabled={!GOOGLE_CLIENT_ID}>
                 {driveAccessToken ? 'Reconnect Drive' : 'Connect Google Drive'}
               </button>
-              <button className="primary-button" onClick={backUpToDrive} disabled={!GOOGLE_CLIENT_ID}>
+              <button className="primary-button" type="button" onClick={backUpToDrive} disabled={!GOOGLE_CLIENT_ID}>
                 Back up now
               </button>
-              <button className="ghost-button" onClick={restoreFromDrive} disabled={!GOOGLE_CLIENT_ID}>
+              <button className="ghost-button" type="button" onClick={restoreFromDrive} disabled={!GOOGLE_CLIENT_ID}>
                 Restore latest
               </button>
-              <button className="ghost-button" onClick={exportState}>
+              <button className="ghost-button" type="button" onClick={exportState}>
                 Export JSON
               </button>
             </div>
@@ -1096,59 +1362,335 @@ export default function Page() {
         )}
 
         {activeSection === 'home' && (
-        <section className="home-workspace">
-          <div className="workspace-heading">
-            <div>
-              <p className="eyebrow">Workspaces</p>
-              <h2>Choose what you need to work on</h2>
+          <section className="space-y-6">
+            <div className={SURFACE_CARD}>
+              <div className="grid gap-6 p-6 lg:grid-cols-[minmax(0,1.15fr)_360px] lg:p-8">
+                <div className="space-y-5">
+                  <div className="inline-flex items-center rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-blue-700">
+                    Current week
+                  </div>
+                  <div className="space-y-3">
+                    <h2 className="text-4xl font-semibold tracking-tight text-slate-950 md:text-5xl">Staffing Board</h2>
+                    <p className="max-w-2xl text-base leading-7 text-slate-600 md:text-lg">
+                      {selectedPeriod.label} is the work week in view. {openShiftCount} open shift{openShiftCount === 1 ? '' : 's'}, {conflictCount}{' '}
+                      conflict{conflictCount === 1 ? '' : 's'}, and {overtimeRiskCount} employee{overtimeRiskCount === 1 ? '' : 's'} near overtime.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <button className={SURFACE_BUTTON_PRIMARY} type="button" onClick={openScheduleCenter}>
+                      Open Schedule
+                    </button>
+                    <button className={SURFACE_BUTTON_SECONDARY} type="button" onClick={copyLastWeek}>
+                      Copy Last Week
+                    </button>
+                    <button className={SURFACE_BUTTON_MUTED} type="button" onClick={buildScheduleNow}>
+                      Build Schedule
+                    </button>
+                  </div>
+                </div>
+
+                <div className={SURFACE_SOFT}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Week picker</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-950">{selectedPeriod.label}</p>
+                    </div>
+                    <span
+                      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
+                        weekHealthTone === 'good' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
+                      }`}
+                    >
+                      {weekHealthLabel}
+                    </span>
+                  </div>
+                  <div className="mt-4">
+                    <PeriodSelector period={period} setPeriod={setPeriod} />
+                  </div>
+                  <div className={`mt-5 grid gap-3 ${INLINE_CARD}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-slate-500">Current week</span>
+                      <span className="text-sm font-semibold text-slate-900">{activePeriodLabel}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-slate-500">Save state</span>
+                      <span className="text-sm font-semibold text-slate-900">{storageLabel}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-slate-500">Published to team</span>
+                      <span className="text-sm font-semibold text-slate-900">{state.schedulePublishedAt ? 'Yes' : 'Not yet'}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-slate-500">Availability</span>
+                      <span className="text-sm font-semibold text-slate-900">
+                        {activeAvailabilityCount}/{state.employees.length} employees set
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
-            <span className="muted">{activePeriodLabel}</span>
-          </div>
-          <section className="action-launcher">
-            <ActionTile
-              title="Schedules"
-              description="Business hours, staffing needs, review, publish, and PDF export."
-              buttonLabel="Open schedules"
-              href={sectionHref('schedules')}
-              onClick={() => goToSection('schedules')}
-            />
-            <ActionTile
-              title="Availability"
-            description="Weekly availability for each employee."
-              buttonLabel="Open availability"
-              href={sectionHref('availability')}
-              onClick={() => goToSection('availability')}
-            />
-            <ActionTile
-              title="Setup"
-              description="Reusable shift templates and business hours."
-              buttonLabel="Open setup"
-              href={sectionHref('setup')}
-              onClick={() => goToSection('setup')}
-            />
-            <ActionTile
-              title="Employees"
-              description="Names, hour limits, and priority."
-              buttonLabel="Open employees"
-              href={sectionHref('employees')}
-              onClick={() => goToSection('employees')}
-            />
-            <ActionTile
-              title="Dashboard"
-              description="Quick totals for hours, alerts, and schedule health."
-              buttonLabel="Open dashboard"
-              href={sectionHref('dashboard')}
-              onClick={() => goToSection('dashboard')}
-            />
-            <ActionTile
-              title="User Guide"
-              description="A plain-language walkthrough for the owner and managers."
-              buttonLabel="Open guide"
-              href={sectionHref('guide')}
-              onClick={() => goToSection('guide')}
-            />
+
+            <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+              {[
+                {
+                  label: 'Scheduled Hours',
+                  value: `${currentWeekHours.toFixed(1)} hrs`,
+                  detail: `${reviewedRange.weeks.length} week${reviewedRange.weeks.length === 1 ? '' : 's'} in view`,
+                  tone: 'blue',
+                },
+                {
+                  label: 'Open Shifts',
+                  value: `${openShiftCount}`,
+                  detail: openShiftCount ? 'Needs staffing attention' : 'All covered right now',
+                  tone: openShiftCount ? 'amber' : 'emerald',
+                },
+                {
+                  label: 'Conflicts',
+                  value: `${conflictCount}`,
+                  detail: conflictCount ? 'Review availability and rules' : 'No blocking issues',
+                  tone: conflictCount ? 'amber' : 'emerald',
+                },
+                {
+                  label: 'Overtime Risk',
+                  value: `${overtimeRiskCount}`,
+                  detail: overtimeRiskCount ? 'Employees nearing max hours' : 'No one near max hours',
+                  tone: overtimeRiskCount ? 'amber' : 'emerald',
+                },
+                {
+                  label: 'Labor Cost',
+                  value: 'Not tracked',
+                  detail: 'Hours-only planning mode',
+                  tone: 'slate',
+                },
+              ].map((item) => (
+                <article key={item.label} className={`group ${SURFACE_TILE}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">{item.label}</p>
+                  <div className="mt-3 flex items-end justify-between gap-4">
+                    <strong className="text-2xl font-semibold tracking-tight text-slate-950">{item.value}</strong>
+                    <span
+                      className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+                        item.tone === 'emerald'
+                          ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+                          : item.tone === 'amber'
+                          ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
+                          : item.tone === 'blue'
+                          ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'
+                          : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'
+                      }`}
+                    >
+                      {item.tone === 'emerald' ? 'Good' : item.tone === 'amber' ? 'Watch' : item.tone === 'blue' ? 'Live' : 'Mode'}
+                    </span>
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-slate-500">{item.detail}</p>
+                </article>
+              ))}
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-2">
+              <div className="space-y-6">
+                <article className={SURFACE_CARD_PAD}>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Week status</p>
+                      <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{weekHealthLabel}</h3>
+                    </div>
+                    <button className="text-sm font-semibold text-blue-700 transition hover:text-blue-600 focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white" type="button" onClick={openScheduleCenter}>
+                      Open Schedule
+                    </button>
+                  </div>
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <div className={INLINE_CARD}>
+                      <p className="text-sm font-medium text-slate-500">Current week</p>
+                      <p className="mt-1 text-base font-semibold text-slate-950">{activePeriodLabel}</p>
+                    </div>
+                    <div className={INLINE_CARD}>
+                      <p className="text-sm font-medium text-slate-500">Coverage</p>
+                      <p className="mt-1 text-base font-semibold text-slate-950">{currentWeekHours.toFixed(1)} scheduled hours</p>
+                    </div>
+                    <div className={INLINE_CARD}>
+                      <p className="text-sm font-medium text-slate-500">Active employees</p>
+                      <p className="mt-1 text-base font-semibold text-slate-950">{activeCount}</p>
+                    </div>
+                    <div className={INLINE_CARD}>
+                    <p className="text-sm font-medium text-slate-500">Availability ready</p>
+                    <p className="mt-1 text-base font-semibold text-slate-950">{activeAvailabilityCount} people</p>
+                    </div>
+                  </div>
+                </article>
+
+                <article className={SURFACE_CARD_PAD}>
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Alerts</p>
+                    <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">What needs attention</h3>
+                  </div>
+                  <div className="mt-5 space-y-3">
+                    {homeAlerts.length ? (
+                      homeAlerts.map((alert) => (
+                        <div key={alert.key} className={INLINE_CARD}>
+                          <div className="flex items-start gap-3">
+                            <span
+                              className={`mt-0.5 inline-flex h-3 w-3 shrink-0 rounded-full ${
+                                alert.tone === 'amber' ? 'bg-amber-500' : alert.tone === 'blue' ? 'bg-blue-500' : 'bg-slate-400'
+                              }`}
+                            />
+                            <p className="text-sm leading-6 text-slate-700">{alert.label}</p>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className={INLINE_CARD_EMPHASIS}>
+                        No blocking alerts. The week is in good shape.
+                      </div>
+                    )}
+                  </div>
+                </article>
+
+                <article className={SURFACE_CARD_PAD}>
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Upcoming actions</p>
+                    <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">What to do next</h3>
+                  </div>
+                  <ul className="mt-5 space-y-3">
+                    <li className="flex items-start gap-3 rounded-[20px] bg-slate-50 p-4 ring-1 ring-slate-200">
+                      <span className="mt-1 h-2.5 w-2.5 rounded-full bg-blue-500" />
+                      <span className="text-sm leading-6 text-slate-700">
+                        {openShiftCount ? `Fill ${openShiftCount} open shift${openShiftCount === 1 ? '' : 's'} before publishing.` : 'Open the schedule to review the week.'}
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-3 rounded-[20px] bg-slate-50 p-4 ring-1 ring-slate-200">
+                      <span className="mt-1 h-2.5 w-2.5 rounded-full bg-amber-500" />
+                      <span className="text-sm leading-6 text-slate-700">
+                        {overtimeRiskCount
+                          ? `${overtimeRiskCount} employee${overtimeRiskCount === 1 ? '' : 's'} are near their maximum hours.`
+                          : 'Hours look balanced across the team.'}
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-3 rounded-[20px] bg-slate-50 p-4 ring-1 ring-slate-200">
+                      <span className="mt-1 h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                      <span className="text-sm leading-6 text-slate-700">
+                        Use the calendar export once the week is ready for the whiteboard.
+                      </span>
+                    </li>
+                  </ul>
+                </article>
+              </div>
+
+              <div className="space-y-6">
+                <article className={SURFACE_CARD_PAD}>
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Quick actions</p>
+                    <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Fast owner controls</h3>
+                  </div>
+                  <div className="mt-5 grid gap-3">
+                    <button className="flex items-center justify-between rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-left text-sm font-semibold text-slate-800 transition hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white" type="button" onClick={openScheduleCenter}>
+                      <span>Open schedule</span>
+                      <span className="text-blue-600">→</span>
+                    </button>
+                    <button className="flex items-center justify-between rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-left text-sm font-semibold text-slate-800 transition hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white" type="button" onClick={buildScheduleNow}>
+                      <span>Build schedule</span>
+                      <span className="text-blue-600">→</span>
+                    </button>
+                    <button className="flex items-center justify-between rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-left text-sm font-semibold text-slate-800 transition hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white" type="button" onClick={() => goToSection('availability')}>
+                      <span>View availability</span>
+                      <span className="text-blue-600">→</span>
+                    </button>
+                    <button className="flex items-center justify-between rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-left text-sm font-semibold text-slate-800 transition hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white" type="button" onClick={() => setShowDriveMenu(true)}>
+                      <span>Back up to Google Drive</span>
+                      <span className="text-blue-600">→</span>
+                    </button>
+                  </div>
+                </article>
+
+                <article className={SURFACE_CARD_PAD}>
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Availability changes</p>
+                    <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Who can work this week</h3>
+                  </div>
+                  <div className="mt-5 space-y-3">
+                    {availabilityPreview.length ? (
+                      availabilityPreview.map((employee) => (
+                        <div key={employee.id} className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-900">{employee.name}</p>
+                            <p className="text-sm text-slate-500">{employee.blocks} weekly block{employee.blocks === 1 ? '' : 's'}</p>
+                          </div>
+                          <span className="inline-flex rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
+                            Ready
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-[20px] border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+                        No weekly availability has been entered yet.
+                      </div>
+                    )}
+                  </div>
+                </article>
+
+                <article className={SURFACE_CARD_PAD}>
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Recent status</p>
+                    <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Saved and published</h3>
+                  </div>
+                  <div className="mt-5 grid gap-3">
+                    <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
+                      <span className="text-sm font-medium text-slate-500">Saved here</span>
+                      <span className="text-sm font-semibold text-slate-900">{storageLabel}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
+                      <span className="text-sm font-medium text-slate-500">Auto-save</span>
+                      <span className="text-sm font-semibold text-slate-900">Always on</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
+                      <span className="text-sm font-medium text-slate-500">Last saved</span>
+                      <span className="text-sm font-semibold text-slate-900">{new Date(state.updatedAt).toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
+                      <span className="text-sm font-medium text-slate-500">Published to team</span>
+                      <span className="text-sm font-semibold text-slate-900">{state.schedulePublishedAt ? new Date(state.schedulePublishedAt).toLocaleString() : 'Not yet published'}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
+                      <span className="text-sm font-medium text-slate-500">Drive backup</span>
+                      <span className="text-sm font-semibold text-slate-900">{driveBackupAt ? new Date(driveBackupAt).toLocaleString() : 'Not backed up'}</span>
+                    </div>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section className="space-y-4">
+              <div className="flex items-end justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Workspace shortcuts</p>
+                  <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Jump to the next task</h3>
+                </div>
+                <span className="hidden text-sm font-medium text-slate-500 md:block">{selectedPeriod.label}</span>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {shortcutItems.map((item) => (
+                  <button
+                    key={item.section}
+                    className="group rounded-[24px] border border-slate-200/80 bg-white/90 p-5 text-left shadow-sm transition duration-200 hover:-translate-y-1 hover:border-blue-200 hover:shadow-xl"
+                    onClick={() => goToSection(item.section)}
+                  >
+                    <div className="flex items-start gap-4">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-blue-600 transition group-hover:bg-blue-50">
+                        <SectionGlyph kind={item.icon} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-lg font-semibold tracking-tight text-slate-950">{item.title}</p>
+                        <p className="mt-2 text-sm leading-6 text-slate-500">{item.description}</p>
+                        <span className="mt-4 inline-flex items-center text-sm font-semibold text-blue-700 transition group-hover:text-blue-600">
+                          {item.cta}
+                          <span className="ml-2 transition group-hover:translate-x-0.5">→</span>
+                        </span>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
           </section>
-        </section>
         )}
 
         {activeSection === 'dashboard' && (
@@ -1166,22 +1708,22 @@ export default function Page() {
                 <p className="eyebrow">Period</p>
                 <h2>{activePeriodLabel}</h2>
               </div>
-              <button className="ghost-button" onClick={() => goToSection('schedules')}>
+              <button className="ghost-button" type="button" onClick={() => goToSection('schedules')}>
                 Review schedule
               </button>
             </div>
             <p className="lede">
-              The current period is the one you will see in Availability and Schedules. Use the buttons below to jump straight to the next task.
+              The current period is the one you will see in Availability and Schedule. Use the buttons below to jump straight to the next task.
             </p>
             <div className="mini-nav">
-              <button className="primary-button" onClick={() => goToSection('employees')}>
+              <button className="primary-button" type="button" onClick={() => goToSection('employees')}>
                 Employees
               </button>
-              <button className="ghost-button" onClick={() => goToSection('availability')}>
+              <button className="ghost-button" type="button" onClick={() => goToSection('availability')}>
                 Availability
               </button>
-              <button className="ghost-button" onClick={() => goToSection('schedules')}>
-                Schedules
+              <button className="ghost-button" type="button" onClick={() => goToSection('schedules')}>
+                Schedule
               </button>
             </div>
           </article>
@@ -1221,6 +1763,7 @@ export default function Page() {
               </div>
               <button
                 className="ghost-button"
+                type="button"
                 onClick={() => {
                   const draft = createEmployeeDraft();
                   setEmployeeDraft(draft);
@@ -1278,11 +1821,11 @@ export default function Page() {
               </label>
             </div>
             <div className="inline-actions">
-              <button className="primary-button" onClick={() => saveEmployee(employeeDraft)}>
+              <button className="primary-button" type="button" onClick={() => saveEmployee(employeeDraft)}>
                 Save employee
               </button>
               {selectedEmployee && (
-                <button className="ghost-button" onClick={() => deleteEmployee(selectedEmployee.id)}>
+                <button className="ghost-button" type="button" onClick={() => deleteEmployee(selectedEmployee.id)}>
                   Delete selected
                 </button>
               )}
@@ -1306,6 +1849,7 @@ export default function Page() {
                 <button
                   key={employee.id}
                   className={employee.id === selectedEmployee.id ? 'employee-row active' : 'employee-row'}
+                  type="button"
                   onClick={() => setSelectedEmployeeId(employee.id)}
                 >
                   <span>
@@ -1345,16 +1889,16 @@ export default function Page() {
                 ))}
               </div>
               <div className="form-inline">
-                <select value={rangeDraft.day} onChange={(event) => setRangeDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
+                <select name="availability-day" value={rangeDraft.day} onChange={(event) => setRangeDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
                   {DAYS.map((day) => (
                     <option key={day} value={day}>
                       {dayFullLabel(day)}
                     </option>
                   ))}
                 </select>
-                <input type="time" value={rangeDraft.start} onChange={(event) => setRangeDraft((current) => ({ ...current, start: event.target.value }))} />
-                <input type="time" value={rangeDraft.end} onChange={(event) => setRangeDraft((current) => ({ ...current, end: event.target.value }))} />
-                <button className="primary-button" onClick={addWeeklyAvailability}>
+                <input name="availability-start" type="time" value={rangeDraft.start} onChange={(event) => setRangeDraft((current) => ({ ...current, start: event.target.value }))} />
+                <input name="availability-end" type="time" value={rangeDraft.end} onChange={(event) => setRangeDraft((current) => ({ ...current, end: event.target.value }))} />
+                <button className="primary-button" type="button" onClick={addWeeklyAvailability}>
                   Add hours
                 </button>
               </div>
@@ -1390,26 +1934,27 @@ export default function Page() {
             </div>
             <div className="preset-row">
               {QUICK_TIME_PRESETS.map((preset) => (
-                <button
-                  key={preset.label}
-                  className="ghost-button small"
-                  onClick={() => setBusinessHoursDraft((current) => ({ ...current, start: preset.start, end: preset.end }))}
-                >
+                  <button
+                    key={preset.label}
+                    className="ghost-button small"
+                    type="button"
+                    onClick={() => setBusinessHoursDraft((current) => ({ ...current, start: preset.start, end: preset.end }))}
+                  >
                   {preset.label}
                 </button>
               ))}
             </div>
-            <div className="form-inline">
-              <select value={businessHoursDraft.day} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
+              <div className="form-inline">
+              <select name="business-hours-day" value={businessHoursDraft.day} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
                 {DAYS.map((day) => (
                   <option key={day} value={day}>
                     {dayFullLabel(day)}
                   </option>
                 ))}
               </select>
-              <input type="time" value={businessHoursDraft.start} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, start: event.target.value }))} />
-              <input type="time" value={businessHoursDraft.end} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, end: event.target.value }))} />
-              <button className="primary-button" onClick={addBusinessHours}>
+              <input name="business-hours-start" type="time" value={businessHoursDraft.start} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, start: event.target.value }))} />
+              <input name="business-hours-end" type="time" value={businessHoursDraft.end} onChange={(event) => setBusinessHoursDraft((current) => ({ ...current, end: event.target.value }))} />
+              <button className="primary-button" type="button" onClick={addBusinessHours}>
                 Save hours
               </button>
             </div>
@@ -1428,7 +1973,7 @@ export default function Page() {
                     </div>
                     <div className="row-actions">
                       {(rule?.ranges ?? []).map((range, index) => (
-                        <button key={`${day}-${index}`} className="ghost-button small" onClick={() => deleteBusinessHours(day, index)}>
+                        <button key={`${day}-${index}`} className="ghost-button small" type="button" onClick={() => deleteBusinessHours(day, index)}>
                           Remove
                         </button>
                       ))}
@@ -1448,11 +1993,12 @@ export default function Page() {
             </div>
             <div className="preset-row">
               {DEFAULT_SHIFT_TEMPLATES.map((preset) => (
-                <button
-                  key={preset.label}
-                  className="ghost-button small"
-                  onClick={() =>
-                    setTemplateDraft((current) => ({
+                  <button
+                    key={preset.label}
+                    className="ghost-button small"
+                    type="button"
+                    onClick={() =>
+                      setTemplateDraft((current) => ({
                       ...current,
                       label: preset.label,
                       start: preset.start,
@@ -1483,12 +2029,13 @@ export default function Page() {
               </Field>
             </div>
             <div className="inline-actions">
-              <button className="primary-button" onClick={saveShiftTemplate}>
+              <button className="primary-button" type="button" onClick={saveShiftTemplate}>
                 {editingTemplateId ? 'Update template' : 'Save template'}
               </button>
               {editingTemplateId && (
                 <button
                   className="ghost-button"
+                  type="button"
                   onClick={() => {
                     setEditingTemplateId(null);
                     setTemplateDraft({
@@ -1516,10 +2063,10 @@ export default function Page() {
                     <p className="muted">{template.notes || 'Quick add template'}</p>
                   </div>
                   <div className="row-actions">
-                    <button className="ghost-button small" onClick={() => editShiftTemplate(template.id)}>
+                    <button className="ghost-button small" type="button" onClick={() => editShiftTemplate(template.id)}>
                       Edit
                     </button>
-                    <button className="ghost-button small" onClick={() => deleteShiftTemplate(template.id)}>
+                    <button className="ghost-button small" type="button" onClick={() => deleteShiftTemplate(template.id)}>
                       Remove
                     </button>
                   </div>
@@ -1530,304 +2077,514 @@ export default function Page() {
         </section>
         )}
 
-        {activeSection === 'schedules' && (
-        <section className="panel-grid schedule-grid">
-          <article className="panel schedule-command">
-            <div className="workspace-heading">
-              <div>
-                <p className="eyebrow">Schedule Workspace</p>
-                <h2>{selectedPeriod.label}</h2>
-              </div>
-              <div className="row-actions">
-                <button className="primary-button" onClick={refreshSchedule}>
-                  Generate Schedule
-                </button>
-                <button className="ghost-button" onClick={() => goToSection('setup')}>
-                  Open setup
-                </button>
-                <button className="ghost-button" onClick={() => window.print()}>
-                  Export Whiteboard Calendar PDF
-                </button>
-              </div>
-            </div>
-            <div className="schedule-steps" aria-label="Schedule workflow">
-              <div className="schedule-step">
-                <span>1</span>
-                <strong>Choose Dates</strong>
-                <p>{formatDayDate(selectedPeriod.start)} to {formatDayDate(selectedPeriod.end)}</p>
-              </div>
-              <div className="schedule-step">
-                <span>2</span>
-                <strong>Add Shifts</strong>
-                <p>Pick a day, tap a template, and build the week in a few taps.</p>
-              </div>
-              <div className={reviewedRange.alerts.some((alert) => alert.kind !== 'hours') ? 'schedule-step warn' : 'schedule-step good'}>
-                <span>3</span>
-                <strong>Review & Publish</strong>
-                <p>{reviewedRange.alerts.some((alert) => alert.kind !== 'hours') ? 'Resolve conflicts before publish' : 'Ready to publish or export'}</p>
-              </div>
-            </div>
-            <div className="quick-add-panel">
-              <div className="panel-header compact">
-                <div>
-                  <h3>Quick add a shift</h3>
-                  <p className="muted">Choose a day, then tap a reusable template.</p>
-                </div>
-              </div>
-              <div className="form-inline">
-                <Field label="Day">
-                  <select value={requirementDraft.day} onChange={(event) => setRequirementDraft((current) => ({ ...current, day: event.target.value as DayKey }))}>
-                    {DAYS.map((day) => (
-                      <option key={day} value={day}>
-                        {dayFullLabel(day)}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <button className="ghost-button" onClick={() => goToSection('setup')}>
-                  Edit templates
-                </button>
-              </div>
-              <div className="preset-row">
-                {activeShiftTemplates.map((template) => (
-                  <button key={template.id} className="ghost-button small" onClick={() => addRequirementFromTemplate(template)}>
-                    {template.label} {template.start}-{template.end}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Schedules</p>
-                <h2>Selected period</h2>
-              </div>
-            </div>
-            <PeriodSelector period={period} setPeriod={setPeriod} />
-            <div className="review-banner">
-              <div>
-                <p className="eyebrow">Review</p>
-                <strong>{state.schedulePublishedAt ? 'Published' : 'Draft review ready'}</strong>
-                <p className="muted">
-                  {state.schedulePublishedAt
-                    ? `Published ${new Date(state.schedulePublishedAt).toLocaleString()}`
-                    : 'Use the controls in the calendar to swap or clear shifts before publishing.'}
-                </p>
-              </div>
-              <div className="row-actions">
-                <button className="ghost-button" onClick={clearScheduleOverrides} disabled={!Object.keys(state.scheduleOverrides).length}>
-                  Clear overrides
-                </button>
-                <button className="primary-button" onClick={publishSchedule} disabled={reviewedRange.alerts.some((alert) => alert.kind !== 'hours')}>
-                  Publish reviewed schedule
-                </button>
-              </div>
-            </div>
-            <div className={feasibility.feasible ? 'feasibility-card good' : 'feasibility-card warn'}>
-              <div>
-                <p className="eyebrow">Preflight</p>
-                <strong>{feasibility.feasible ? 'Schedule is feasible' : 'Schedule needs attention'}</strong>
-                <p className="muted">
-                  Demand: {feasibility.totalRequiredHours.toFixed(1)} hrs • Capacity: {feasibility.estimatedCapacityHours.toFixed(1)} hrs
-                </p>
-              </div>
-              <span className="status-pill">{Math.round(feasibility.coverageRatio * 100)}% capacity</span>
-            </div>
-            {feasibility.issues.length > 0 && (
-              <ul className="alert-list">
-                {feasibility.issues.slice(0, 4).map((issue) => (
-                  <li key={`${issue.kind}-${issue.message}`}>
-                    <strong>{issue.message}</strong>
-                    {(issue.eligibleEmployees?.length || issue.requiredStaff || issue.eligibleStaff !== undefined) && (
-                      <p className="muted">
-                        {issue.requiredStaff !== undefined ? `Need ${issue.requiredStaff} employee(s)` : null}
-                        {issue.eligibleStaff !== undefined ? `${issue.requiredStaff !== undefined ? ' • ' : ''}${issue.eligibleStaff} eligible` : null}
-                        {issue.eligibleEmployees?.length ? `${issue.requiredStaff !== undefined || issue.eligibleStaff !== undefined ? ' • ' : ''}Eligible: ${issue.eligibleEmployees.join(', ')}` : ' • Eligible: none'}
-                      </p>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="inline-actions">
-              <button className="ghost-button" onClick={() => window.print()}>
-                Export Whiteboard Calendar PDF
-              </button>
-              <button className="ghost-button" onClick={() => setShowDriveMenu(true)}>
-                Google Drive
-              </button>
-            </div>
-            {lastGeneratedAt && <p className="sync-line">Last refreshed {new Date(lastGeneratedAt).toLocaleString()}</p>}
-          </article>
-
-          <article className="panel review-area">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Review</p>
-                <h2>Edit assignments before publishing</h2>
-              </div>
-              <span className="muted">{selectedPeriod.label}</span>
-            </div>
-            <div className="print-summary">
-              <div>
-                <strong>{totalAssignedHours.toFixed(1)} hrs</strong>
-                <p className="muted">Projected scheduled hours for the selected period</p>
-              </div>
-              <div>
-                <strong>{totalAlerts}</strong>
-                <p className="muted">Validation and coverage issues</p>
-              </div>
-            </div>
-            <div className="calendar-stack">
-              {weekSections.map(({ week, dayCards }) => (
-                <section key={week.weekStart.toISOString()} className="week-card">
-                  <div className="panel-header compact">
-                    <div>
-                      <h3>{formatWeekLabel(week.weekStart, week.weekEnd)}</h3>
-                      <p className="muted">Tap into any day to see every assigned shift and employee.</p>
-                    </div>
-                    <span className="status-pill">{week.schedule.totalHours.toFixed(1)} hrs</span>
+        {activeSection === 'schedules' && scheduleWeek && (
+          <section className="space-y-6">
+            <header className="sticky top-4 z-30 rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-sm backdrop-blur xl:top-6">
+              <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+                <div className="space-y-3">
+                  <div className="inline-flex items-center rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-blue-700">
+                    Weekly schedule
                   </div>
-                  <div className="calendar-grid">
-                    {dayCards.map(({ day, requirements, dayAssignments, dayHours }) => (
-                      <div key={day} className="day-card">
-                        <div className="day-card-header">
-                          <strong>{formatDayDate(addDays(week.weekStart, DAYS.indexOf(day)))}</strong>
-                          <span className="muted">
-                            {dayAssignments.length} shifts • {dayHours.toFixed(1)} hrs
-                          </span>
-                        </div>
-                        {requirements.length ? (
-                          <div className="calendar-blocks">
-                            {requirements.map(({ requirement, assignments }) => {
-                              const missing = Math.max(0, requirement.requiredStaff - assignments.length);
-                              const blockDate = assignments[0]?.date ?? isoDateForWeekDay(week.weekStart, requirement.day);
-                              const assignmentsBySlot = new Map(assignments.map((assignment) => [assignment.slotIndex, assignment]));
-                              return (
-                                <div key={requirement.id} className="calendar-block">
-                                  <div className="calendar-block-top">
-                                    <strong>{formatRange(requirement.start, requirement.end)}</strong>
-                                    <span className="status-pill">{requirement.requiredStaff} needed</span>
-                                  </div>
-                                  <p className="muted">{requirement.notes || 'General coverage'}</p>
-                                  <div className="assigned-line">
-                                    {assignments.length ? (
-                                      assignments.map((assignment) => (
-                                        <span key={assignment.id} className="assigned-pill">
-                                          {assignment.employeeName}
-                                        </span>
-                                      ))
-                                    ) : (
-                                      <span className="muted">No one assigned yet</span>
-                                    )}
-                                  </div>
-                                  <div className="review-slots">
-                                    {Array.from({ length: requirement.requiredStaff }, (_, slotIndex) => {
-                                      const assignment = assignmentsBySlot.get(slotIndex);
-                                      const overrideKey = scheduleAssignmentKey({
-                                        date: blockDate,
-                                        blockId: requirement.id,
-                                        slotIndex,
-                                      });
-                                      const overrideValue = Object.prototype.hasOwnProperty.call(state.scheduleOverrides, overrideKey)
-                                        ? state.scheduleOverrides[overrideKey]
-                                        : undefined;
-                                      const currentValue = overrideValue === null ? '__clear__' : overrideValue ?? assignment?.employeeId ?? '__clear__';
-                                      return (
-                                        <label key={`${requirement.id}-${slotIndex}`} className="slot-row">
-                                          <span>Slot {slotIndex + 1}</span>
-                                          <select value={currentValue} onChange={(event) => setScheduleOverride(overrideKey, event.target.value)}>
-                                            <option value="__inherit__">Keep generated</option>
-                                            <option value="__clear__">Unassigned</option>
-                                            {activeEmployees.map((employee) => (
-                                              <option key={employee.id} value={employee.id}>
-                                                {employee.name}
-                                              </option>
-                                            ))}
-                                          </select>
-                                        </label>
-                                      );
-                                    })}
-                                  </div>
-                                  {missing > 0 && <p className="warn-line">Unfilled: {missing}</p>}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <p className="muted">No staffing blocks set for this day.</p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              ))}
-            </div>
-          </article>
-
-          <article className="panel printable-area">
-            <PrintableScheduleCalendar
-              range={reviewedRange}
-              periodStart={selectedPeriod.start}
-              periodEnd={selectedPeriod.end}
-              selectedPeriodLabel={selectedPeriod.label}
-              totalAlerts={totalAlerts}
-            />
-          </article>
-
-          <article className="panel schedule-summary">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Hours summary</p>
-                <h2>Work load</h2>
-              </div>
-              <strong className="hours-large">{totalAssignedHours.toFixed(1)} hrs</strong>
-            </div>
-            <div className="stack">
-              {reviewedRange.weeks.map((week) => (
-                <div key={week.weekStart.toISOString()} className="day-row">
-                  <strong>{formatWeekLabel(week.weekStart, week.weekEnd)}</strong>
-                  <span>{week.schedule.totalHours.toFixed(1)} hrs</span>
-                </div>
-              ))}
-            </div>
-            <div className="spacer" />
-            <div className="scroll-list">
-              {employeeRows.map((employee) => (
-                <div key={employee.id} className="employee-hours-row">
                   <div>
-                    <strong>{employee.name}</strong>
-                    <p className="muted">
-                      {employee.hours.toFixed(1)} hrs
+                    <h2 className="text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">{formatWeekLabel(scheduleWeek.weekStart, scheduleWeek.weekEnd)}</h2>
+                    <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 md:text-base">
+                      {selectedPeriod.label} • {activeEmployees.length} active people • {scheduleWeek.schedule.totalHours.toFixed(1)} scheduled hours •{' '}
+                      {underfilledCount} open shift{underfilledCount === 1 ? '' : 's'}
                     </p>
                   </div>
-                  <div className="right-align">
-                    <strong>{employee.hours.toFixed(1)} hrs</strong>
-                    <p className="muted">Priority {employee.priorityLevel}</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button className={INLINE_BUTTON} type="button" onClick={() => shiftScheduleWeek(-1)}>
+                      Previous week
+                    </button>
+                    <button className={INLINE_BUTTON} type="button" onClick={() => shiftScheduleWeek(1)}>
+                      Next week
+                    </button>
+                    <button className={INLINE_BUTTON} type="button" onClick={copyLastWeek}>
+                      Copy last week
+                    </button>
+                    <button className={INLINE_BUTTON_PRIMARY} type="button" onClick={buildScheduleNow}>
+                      Build schedule
+                    </button>
+                    <button className={INLINE_BUTTON_MUTED} type="button" onClick={autoOptimizeSchedule}>
+                      Fix conflicts
+                    </button>
+                    <button className={INLINE_BUTTON} type="button" onClick={saveScheduleDraft}>
+                      Save draft
+                    </button>
+                    <button
+                      className={INLINE_BUTTON_SUCCESS}
+                      type="button"
+                      onClick={publishSchedule}
+                      disabled={reviewedRange.alerts.some((alert) => alert.kind !== 'hours')}
+                    >
+                      Publish to Team
+                    </button>
+                    <button className={INLINE_BUTTON} type="button" onClick={() => window.print()}>
+                      Export calendar PDF
+                    </button>
                   </div>
                 </div>
-              ))}
-            </div>
-          </article>
 
-          <article className="panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Alerts</p>
-                <h2>Validation and conflicts</h2>
+                  <div className="grid gap-3 sm:grid-cols-2 xl:min-w-[360px] xl:grid-cols-2">
+                  <div className={INLINE_CARD}>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Hours</p>
+                    <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{scheduleWeek.schedule.totalHours.toFixed(1)}</p>
+                    <p className="text-sm text-slate-500">Scheduled this week</p>
+                  </div>
+                  <div className={INLINE_CARD}>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Open shifts</p>
+                    <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{underfilledCount}</p>
+                    <p className="text-sm text-slate-500">Need attention</p>
+                  </div>
+                  <div className={INLINE_CARD}>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Conflicts</p>
+                    <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{reviewedRange.alerts.filter((alert) => alert.kind === 'validation').length}</p>
+                    <p className="text-sm text-slate-500">Blocking issues</p>
+                  </div>
+                  <div className={INLINE_CARD}>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Save state</p>
+                    <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{state.schedulePublishedAt ? 'Published' : 'Draft'}</p>
+                    <p className="text-sm text-slate-500">{lastGeneratedAt ? `Optimized ${new Date(lastGeneratedAt).toLocaleTimeString()}` : 'Ready to work'}</p>
+                  </div>
+                </div>
+              </div>
+            </header>
+
+            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+              <div className="space-y-6">
+                <article id="schedule-quick-add" className={SURFACE_CARD_PAD}>
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Quick add</p>
+                      <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Create a staffing block</h3>
+                      <p className="mt-2 text-sm leading-6 text-slate-500">Choose a day and add one of the reusable shift templates.</p>
+                    </div>
+                    <button className={INLINE_BUTTON} type="button" onClick={() => goToSection('setup')}>
+                      Edit templates
+                    </button>
+                  </div>
+                  <div className="mt-5 flex flex-wrap gap-2">
+                    {DAYS.map((day) => (
+                      <button
+                        key={day}
+                        className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                          requirementDraft.day === day
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'border border-slate-200 bg-white text-slate-700 hover:border-blue-200 hover:bg-blue-50'
+                        }`}
+                        onClick={() => jumpToScheduleDay(day)}
+                      >
+                        {dayFullLabel(day)}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-5 flex flex-wrap gap-2">
+                    {activeShiftTemplates.map((template) => (
+                      <button
+                        key={template.id}
+                        className={INLINE_BUTTON_MUTED}
+                        type="button"
+                        onClick={() => addRequirementFromTemplate(template)}
+                      >
+                        {template.label} <span className="text-slate-400">{template.start} - {template.end}</span>
+                      </button>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="overflow-hidden rounded-[28px] border border-slate-200/80 bg-white/90 shadow-sm">
+                  <div className="flex flex-col gap-3 border-b border-slate-200 px-5 py-5 lg:flex-row lg:items-end lg:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Schedule board</p>
+                      <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Employees across Mon-Sun</h3>
+                      <p className="mt-2 text-sm leading-6 text-slate-500">Tap a shift to edit it, or drop it on another person to reassign it.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <span className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 ring-1 ring-blue-200">Blue = active</span>
+                      <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">Amber = risk</span>
+                      <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">Green = good</span>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <div className="min-w-[1280px]">
+                      <div
+                        className="grid border-b border-slate-200 bg-slate-50/80"
+                        style={{ gridTemplateColumns: 'minmax(240px, 320px) repeat(7, minmax(170px, 1fr))' }}
+                      >
+                        <div className="sticky left-0 z-20 border-r border-slate-200 bg-slate-50/95 px-4 py-4">
+                          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Employee</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-900">Weekly load</p>
+                        </div>
+                        {DAYS.map((day) => {
+                          const summary = scheduleDaySummaries[day];
+                          const date = addDays(scheduleWeek.weekStart, DAYS.indexOf(day));
+                          return (
+                            <div key={day} className="border-r border-slate-200 px-4 py-4 last:border-r-0">
+                              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">{dayFullLabel(day)}</p>
+                              <p className="mt-1 text-sm font-semibold text-slate-950">{formatDayDate(date)}</p>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
+                                  {summary.totalRequired} needed
+                                </span>
+                                <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                                  {summary.totalAssigned} assigned
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="divide-y divide-slate-200">
+                        {activeEmployees.map((employee) => {
+                          const employeeHours = reviewedRange.employeeHours[employee.id] ?? 0;
+                          const availability = state.availability[employee.id] ?? createEmptyAvailability();
+                          return (
+                            <div
+                              key={employee.id}
+                              className="grid min-h-[112px]"
+                              style={{ gridTemplateColumns: 'minmax(240px, 320px) repeat(7, minmax(170px, 1fr))' }}
+                            >
+                              <button
+                                className={`sticky left-0 z-10 border-r border-slate-200 px-4 py-4 text-left transition ${
+                                  selectedScheduleEmployee?.id === employee.id ? 'bg-blue-50/95' : 'bg-white/95 hover:bg-slate-50'
+                                }`}
+                                onClick={() => selectScheduleEmployee(employee.id)}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <p className="text-base font-semibold text-slate-950">{employee.name}</p>
+                                    <p className="mt-1 text-sm text-slate-500">
+                                      {employeeHours.toFixed(1)} / {employee.maxAllowedWeeklyHours} hrs
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                                      employeeHours > employee.maxAllowedWeeklyHours
+                                        ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200'
+                                        : employeeHours > employee.maxAllowedWeeklyHours * 0.85
+                                        ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
+                                        : 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+                                    }`}
+                                  >
+                                    {employeeHours > employee.maxAllowedWeeklyHours ? 'Over' : employeeHours > employee.maxAllowedWeeklyHours * 0.85 ? 'Near max' : 'Good'}
+                                  </span>
+                                </div>
+                                <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+                                  <div
+                                    className={`h-full rounded-full ${
+                                      employeeHours > employee.maxAllowedWeeklyHours
+                                        ? 'bg-rose-500'
+                                        : employeeHours > employee.maxAllowedWeeklyHours * 0.85
+                                        ? 'bg-amber-500'
+                                        : 'bg-blue-500'
+                                    }`}
+                                    style={{
+                                      width: `${Math.min(100, employee.maxAllowedWeeklyHours ? (employeeHours / employee.maxAllowedWeeklyHours) * 100 : 0)}%`,
+                                    }}
+                                  />
+                                </div>
+                              </button>
+
+                              {DAYS.map((day) => {
+                                const date = isoDateForWeekDay(scheduleWeek.weekStart, day);
+                                const assignments = scheduleAssignments.filter((assignment) => assignment.employeeId === employee.id && assignment.day === day);
+                                const requirements = scheduleDaySummaries[day].blocks;
+                                const employeeAvailabilityBlocks = availability.weeklyAvailability.filter((rule) => rule.day === day);
+                                const canWorkAny = employeeAvailabilityBlocks.length > 0;
+                                const rowConflicts = assignments
+                                  .map((assignment) =>
+                                    canWorkBlock(
+                                      assignment.employeeId,
+                                      { day: assignment.day, start: assignment.start, end: assignment.end, date: assignment.date },
+                                      state,
+                                      scheduleAssignments
+                                        .filter((other) => other.id !== assignment.id)
+                                        .map((other) => ({ employeeId: other.employeeId, day: other.day, start: other.start, end: other.end })),
+                                    ),
+                                  )
+                                  .filter((result) => !result.allowed);
+
+                                return (
+                                  <div
+                                    key={`${employee.id}-${day}`}
+                                    className={`min-h-[112px] border-r border-slate-200 px-3 py-3 last:border-r-0 ${
+                                      !canWorkAny ? 'bg-rose-50/60' : 'bg-white'
+                                    }`}
+                                    onDragOver={(event) => event.preventDefault()}
+                                    onDrop={() => moveDraggedAssignmentToEmployee(employee.id)}
+                                  >
+                                    <button
+                                      className="flex min-h-24 w-full flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-center text-sm font-semibold text-slate-500 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                                      type="button"
+                                      onClick={() => jumpToScheduleDay(day)}
+                                    >
+                                      <span>Add shift</span>
+                                      <span className="mt-1 text-xs font-medium text-slate-400">{formatDayDate(new Date(date))}</span>
+                                    </button>
+
+                                    <div className="mt-3 space-y-2">
+                                      {assignments.map((assignment) => {
+                                        const requirement = requirements.find((entry) => entry.id === assignment.blockId);
+                                        const conflict = canWorkBlock(
+                                          assignment.employeeId,
+                                          { day: assignment.day, start: assignment.start, end: assignment.end, date: assignment.date },
+                                          state,
+                                          scheduleAssignments
+                                            .filter((other) => other.id !== assignment.id)
+                                            .map((other) => ({ employeeId: other.employeeId, day: other.day, start: other.start, end: other.end })),
+                                        );
+                                        const assignmentTone = !conflict.allowed
+                                          ? 'border-rose-200 bg-rose-50 text-rose-800'
+                                          : employeeHours > employee.maxAllowedWeeklyHours * 0.85
+                                          ? 'border-amber-200 bg-amber-50 text-amber-800'
+                                          : 'border-blue-200 bg-blue-50 text-blue-800';
+                                        return (
+                                          <button
+                                            key={assignment.id}
+                                            draggable
+                                            onDragStart={() => setDraggedScheduleAssignment(assignment.id)}
+                                            onClick={() => selectScheduleAssignment(assignment.id, employee.id)}
+                                            className={`group flex w-full flex-col gap-1 rounded-[18px] border px-3 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg ${assignmentTone}`}
+                                          >
+                                            <div className="flex items-center justify-between gap-2">
+                                              <span className="text-sm font-semibold">{formatRange(assignment.start, assignment.end)}</span>
+                                              <span className="rounded-full bg-white/60 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">
+                                                {assignment.slotIndex + 1}/{assignment.requiredStaff}
+                                              </span>
+                                            </div>
+                                            <p className="text-xs font-medium opacity-80">{requirement?.notes || 'Coverage shift'}</p>
+                                            <div className="flex flex-wrap gap-2">
+                                              <span className="rounded-full bg-white/70 px-2 py-1 text-[11px] font-semibold">Drag me</span>
+                                              {!conflict.allowed && <span className="rounded-full bg-rose-100 px-2 py-1 text-[11px] font-semibold text-rose-700">Conflict</span>}
+                                            </div>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+
+                                    {rowConflicts.length > 0 && (
+                                      <div className="mt-3 rounded-[16px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                                        Availability conflict
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </article>
+
+                <article className="hidden printable-area">
+                  <PrintableScheduleCalendar
+                    range={reviewedRange}
+                    periodStart={selectedPeriod.start}
+                    periodEnd={selectedPeriod.end}
+                    selectedPeriodLabel={selectedPeriod.label}
+                    totalAlerts={totalAlerts}
+                  />
+                </article>
+              </div>
+
+              <aside className="space-y-6 xl:sticky xl:top-6">
+                <article className={SURFACE_CARD}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Shift details</p>
+                      <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Details</h3>
+                    </div>
+                    <button className="text-sm font-semibold text-blue-700 transition hover:text-blue-600 focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white" type="button" onClick={() => setSelectedScheduleAssignmentId('')}>
+                      Clear
+                    </button>
+                  </div>
+
+                  {selectedScheduleAssignment ? (
+                    <div className="mt-5 space-y-4">
+                      <div className="rounded-[20px] bg-slate-50 p-4 ring-1 ring-slate-200">
+                        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Shift</p>
+                        <p className="mt-2 text-xl font-semibold tracking-tight text-slate-950">{formatRange(selectedScheduleAssignment.start, selectedScheduleAssignment.end)}</p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          {dayFullLabel(selectedScheduleAssignment.day)} • {selectedScheduleAssignment.employeeName}
+                        </p>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className={INLINE_CARD}>
+                          <p className="text-sm font-medium text-slate-500">Required staff</p>
+                          <p className="mt-1 text-lg font-semibold text-slate-950">{selectedScheduleAssignment.requiredStaff}</p>
+                        </div>
+                        <div className={INLINE_CARD}>
+                          <p className="text-sm font-medium text-slate-500">Slot</p>
+                          <p className="mt-1 text-lg font-semibold text-slate-950">
+                            {selectedScheduleAssignment.slotIndex + 1} / {selectedScheduleAssignment.requiredStaff}
+                          </p>
+                        </div>
+                      </div>
+                      <div className={INLINE_CARD}>
+                        <p className="text-sm font-medium text-slate-500">Notes</p>
+                        <p className="mt-1 text-sm leading-6 text-slate-700">
+                          {scheduleDaySummaries[selectedScheduleAssignment.day].blocks.find((entry) => entry.id === selectedScheduleAssignment.blockId)?.notes || 'General coverage'}
+                        </p>
+                      </div>
+
+                      <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+                        <p className="text-sm font-semibold text-slate-900">Edit assignment</p>
+                        <select
+                          name="assignment-override"
+                          className="mt-3 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                          value={Object.prototype.hasOwnProperty.call(state.scheduleOverrides, scheduleAssignmentKey({
+                            date: selectedScheduleAssignment.date,
+                            blockId: selectedScheduleAssignment.blockId,
+                            slotIndex: selectedScheduleAssignment.slotIndex,
+                          }))
+                            ? state.scheduleOverrides[
+                                scheduleAssignmentKey({
+                                  date: selectedScheduleAssignment.date,
+                                  blockId: selectedScheduleAssignment.blockId,
+                                  slotIndex: selectedScheduleAssignment.slotIndex,
+                                })
+                              ] ?? '__clear__'
+                            : selectedScheduleAssignment.employeeId}
+                          onChange={(event) =>
+                            setScheduleOverride(
+                              scheduleAssignmentKey({
+                                date: selectedScheduleAssignment.date,
+                                blockId: selectedScheduleAssignment.blockId,
+                                slotIndex: selectedScheduleAssignment.slotIndex,
+                              }),
+                              event.target.value,
+                            )
+                          }
+                        >
+                          <option value="__inherit__">Keep generated</option>
+                          <option value="__clear__">Unassigned</option>
+                          {activeEmployees.map((employee) => (
+                            <option key={employee.id} value={employee.id}>
+                              {employee.name}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button className={INLINE_BUTTON} type="button" onClick={() => selectScheduleEmployee(selectedScheduleAssignment.employeeId)}>
+                            Open employee
+                          </button>
+                          <button className={INLINE_BUTTON} type="button" onClick={() => goToSection('availability')}>
+                            Availability
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : selectedScheduleEmployee ? (
+                    <div className="mt-5 space-y-4">
+                      <div className={INLINE_CARD}>
+                        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Employee</p>
+                        <p className="mt-2 text-xl font-semibold tracking-tight text-slate-950">{selectedScheduleEmployee.name}</p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          {reviewedRange.employeeHours[selectedScheduleEmployee.id]?.toFixed(1) ?? '0.0'} hrs scheduled
+                        </p>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className={INLINE_CARD}>
+                          <p className="text-sm font-medium text-slate-500">Preferred</p>
+                          <p className="mt-1 text-lg font-semibold text-slate-950">{selectedScheduleEmployee.minPreferredWeeklyHours} hrs</p>
+                        </div>
+                        <div className={INLINE_CARD}>
+                          <p className="text-sm font-medium text-slate-500">Maximum</p>
+                          <p className="mt-1 text-lg font-semibold text-slate-950">{selectedScheduleEmployee.maxAllowedWeeklyHours} hrs</p>
+                        </div>
+                      </div>
+                      <div className={INLINE_CARD}>
+                          <p className="text-sm font-medium text-slate-500">Availability</p>
+                        <p className="mt-1 text-sm leading-6 text-slate-700">
+                          {selectedScheduleEmployee.id in state.availability && state.availability[selectedScheduleEmployee.id].weeklyAvailability.length
+                            ? `${state.availability[selectedScheduleEmployee.id].weeklyAvailability.length} weekly availability block(s)`
+                            : 'No weekly availability entered yet.'}
+                        </p>
+                      </div>
+                      <div className={INLINE_CARD}>
+                        <p className="text-sm font-medium text-slate-500">Notes</p>
+                        <p className="mt-1 text-sm leading-6 text-slate-700">{selectedScheduleEmployee.notes || 'No notes added.'}</p>
+                      </div>
+                      <button
+                        className={INLINE_BUTTON_PRIMARY}
+                        type="button"
+                        onClick={() => goToSection('availability')}
+                      >
+                        Open availability
+                      </button>
+                    </div>
+                  ) : (
+                    <div className={INLINE_CARD}>
+                      Select a shift or employee on the board to see details here.
+                    </div>
+                  )}
+                </article>
+
+                <article className="rounded-[28px] border border-slate-200/80 bg-white/95 p-6 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Status</p>
+                      <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Week health</h3>
+                    </div>
+                    <span
+                      className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+                        feasibility.feasible ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
+                      }`}
+                    >
+                      {feasibility.feasible ? 'Ready' : 'Needs attention'}
+                    </span>
+                  </div>
+                  <div className="mt-5 space-y-3">
+                    <div className="rounded-[20px] bg-slate-50 p-4 ring-1 ring-slate-200">
+                      <p className="text-sm font-medium text-slate-500">Hours needed vs hours available</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-950">
+                        {feasibility.totalRequiredHours.toFixed(1)} hrs needed · {feasibility.estimatedCapacityHours.toFixed(1)} hrs available
+                      </p>
+                    </div>
+                    <div className="rounded-[20px] bg-slate-50 p-4 ring-1 ring-slate-200">
+                      <p className="text-sm font-medium text-slate-500">Availability ready</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-950">{activeAvailabilityCount} people have weekly availability</p>
+                    </div>
+                    <div className="rounded-[20px] bg-slate-50 p-4 ring-1 ring-slate-200">
+                      <p className="text-sm font-medium text-slate-500">Last update</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-950">{lastGeneratedAt ? new Date(lastGeneratedAt).toLocaleString() : 'Not optimized yet'}</p>
+                    </div>
+                  </div>
+                </article>
+              </aside>
+            </div>
+
+            <article className="hidden printable-area">
+              <PrintableScheduleCalendar
+                range={reviewedRange}
+                periodStart={selectedPeriod.start}
+                periodEnd={selectedPeriod.end}
+                selectedPeriodLabel={selectedPeriod.label}
+                totalAlerts={totalAlerts}
+              />
+            </article>
+
+            <div className="sticky bottom-4 z-30 mx-auto grid max-w-5xl gap-2 rounded-[24px] border border-slate-200/80 bg-white/95 p-3 shadow-xl backdrop-blur lg:hidden">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <button className={INLINE_BUTTON_PRIMARY} type="button" onClick={buildScheduleNow}>
+                  Build
+                </button>
+                <button className={INLINE_BUTTON} type="button" onClick={saveScheduleDraft}>
+                  Save
+                </button>
+                <button className={INLINE_BUTTON_SUCCESS} type="button" onClick={publishSchedule} disabled={reviewedRange.alerts.some((alert) => alert.kind !== 'hours')}>
+                  Publish to Team
+                </button>
+                <button className={INLINE_BUTTON} type="button" onClick={() => window.print()}>
+                  Export
+                </button>
               </div>
             </div>
-            <ul className="alert-list">
-              {scheduleWarnings.length ? (
-                scheduleWarnings.map((warning) => <li key={warning}>{warning}</li>)
-              ) : (
-                <li>No configuration validation issues.</li>
-              )}
-            </ul>
-          </article>
-        </section>
+          </section>
         )}
 
         {activeSection === 'guide' && (
@@ -1862,38 +2619,65 @@ function Metric({
   );
 }
 
-function ActionTile({
-  title,
-  description,
-  buttonLabel,
-  href,
-  onClick,
-}: {
-  title: string;
-  description: string;
-  buttonLabel: string;
-  href?: string;
-  onClick: () => void;
-}) {
-  const action = href ? (
-    <a className="primary-button" href={href} onClick={onClick}>
-      {buttonLabel}
-    </a>
-  ) : (
-    <button className="primary-button" onClick={onClick}>
-      {buttonLabel}
-    </button>
-  );
+function SectionGlyph({ kind }: { kind: 'schedule' | 'availability' | 'setup' | 'employees' | 'dashboard' | 'guide' }) {
+  const common = {
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+  };
 
-  return (
-    <article className="action-tile">
-      <div>
-        <p className="eyebrow">{title}</p>
-        <p className="action-copy">{description}</p>
-      </div>
-      {action}
-    </article>
-  );
+  switch (kind) {
+    case 'schedule':
+      return (
+        <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+          <rect x="3.5" y="5.5" width="17" height="15" rx="3" {...common} />
+          <path d="M8 3.5v4M16 3.5v4M3.5 9.5h17" {...common} />
+        </svg>
+      );
+    case 'availability':
+      return (
+        <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+          <circle cx="12" cy="12" r="7.5" {...common} />
+          <path d="M12 8.5v4l2.5 1.5" {...common} />
+        </svg>
+      );
+    case 'setup':
+      return (
+        <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16" {...common} />
+          <circle cx="9" cy="7" r="1.8" fill="currentColor" stroke="none" />
+          <circle cx="15" cy="12" r="1.8" fill="currentColor" stroke="none" />
+          <circle cx="11" cy="17" r="1.8" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'employees':
+      return (
+        <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+          <circle cx="9" cy="8.5" r="3" {...common} />
+          <path d="M3.8 18.5c.8-3 3-5 5.2-5s4.4 2 5.2 5" {...common} />
+          <path d="M15.5 8.5h4M17.5 6.5v4" {...common} />
+        </svg>
+      );
+    case 'dashboard':
+      return (
+        <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+          <path d="M4 19h16" {...common} />
+          <rect x="5" y="11" width="3.5" height="5.5" rx="1" {...common} />
+          <rect x="10.25" y="8" width="3.5" height="8.5" rx="1" {...common} />
+          <rect x="15.5" y="5.5" width="3.5" height="11" rx="1" {...common} />
+        </svg>
+      );
+    case 'guide':
+      return (
+        <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+          <path d="M6 4.5h9.5a2 2 0 0 1 2 2V20H8a2 2 0 0 1-2-2V4.5Z" {...common} />
+          <path d="M6 4.5A2 2 0 0 0 4 6.5V18a2 2 0 0 0 2 2" {...common} />
+          <path d="M9 8h6M9 11h6M9 14h4" {...common} />
+        </svg>
+      );
+  }
 }
 
 function Field({
@@ -1903,10 +2687,21 @@ function Field({
   label: string;
   children: ReactNode;
 }) {
+  const normalizedName = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const input = isValidElement(children)
+    ? (() => {
+        const child = children as ReactElement<{ name?: string; autoComplete?: string }>;
+        return cloneElement(child, {
+          name: child.props.name ?? normalizedName,
+          autoComplete: child.props.autoComplete ?? 'off',
+        });
+      })()
+    : children;
+
   return (
     <label className="field">
       <span>{label}</span>
-      {children}
+      {input}
     </label>
   );
 }
@@ -1927,7 +2722,7 @@ function RuleList({
       {items.map((item) => (
         <div key={item.id} className="rule-row">
           <span>{item.label}</span>
-          <button className="ghost-button small" onClick={() => onDelete(item.id)}>
+          <button className="ghost-button small" type="button" onClick={() => onDelete(item.id)}>
             Remove
           </button>
         </div>
@@ -2039,7 +2834,7 @@ function UserGuide({
     <section className="guide-workspace">
       <div className="workspace-heading">
         <div>
-          <p className="eyebrow">User Guide</p>
+          <p className="eyebrow">Guide</p>
           <h2>How to build and publish a weekly schedule</h2>
         </div>
       </div>
@@ -2048,45 +2843,45 @@ function UserGuide({
         <article className="guide-section">
           <span className="guide-number">1</span>
           <div>
-            <h3>Add employees</h3>
+            <h3>Add people</h3>
               <p>
-              Open Employees and enter each person&apos;s name, preferred hours, maximum hours, and priority level.
-              Higher priority employees are considered first when the schedule is generated.
+              Open People and enter each person&apos;s name, preferred hours, maximum hours, and priority level.
+              Higher priority people are considered first when the schedule is generated.
             </p>
-            <button className="ghost-button" onClick={onOpenEmployees}>Open Employees</button>
+            <button className="ghost-button" type="button" onClick={onOpenEmployees}>Open People</button>
           </div>
         </article>
 
         <article className="guide-section">
           <span className="guide-number">2</span>
           <div>
-            <h3>Enter availability</h3>
+            <h3>Set availability</h3>
             <p>
-              Open Availability, choose the employee, then add the days and times that person can work each week. Keep this screen simple:
+              Open Availability, choose the person, then add the days and times that person can work each week. Keep this screen simple:
               select the day, enter the times, and save the weekly hours.
             </p>
-            <button className="ghost-button" onClick={onOpenAvailability}>Open Availability</button>
+            <button className="ghost-button" type="button" onClick={onOpenAvailability}>View Availability</button>
           </div>
         </article>
 
         <article className="guide-section">
           <span className="guide-number">3</span>
           <div>
-            <h3>Set business hours and templates</h3>
+            <h3>Set hours and shift patterns</h3>
             <p>
-              Open Setup to define the business hours and reusable shift templates. This is where you make the common shifts that you
+              Open Shifts to define the business hours and reusable shift patterns. This is where you make the common shifts that you
               can add quickly later.
             </p>
-            <button className="ghost-button" onClick={onOpenSetup}>Open Setup</button>
+            <button className="ghost-button" type="button" onClick={onOpenSetup}>Open Shifts</button>
           </div>
         </article>
 
         <article className="guide-section">
           <span className="guide-number">4</span>
           <div>
-            <h3>Generate and review</h3>
+            <h3>Build and review</h3>
             <p>
-              Tap Generate Schedule. Then use the quick-add shift buttons, review every slot in the calendar, and swap or clear any
+              Tap Build Schedule. Then use the quick-add shift buttons, review every slot in the schedule, and swap or clear any
               assignment before publishing.
             </p>
           </div>
@@ -2095,24 +2890,23 @@ function UserGuide({
         <article className="guide-section">
           <span className="guide-number">5</span>
           <div>
-            <h3>Fix alerts before publishing</h3>
+            <h3>Fix conflicts before publishing</h3>
             <p>
               If the schedule has conflicts or understaffed blocks, the app will list them in Alerts. Fix the availability, staffing
-              requirement, or manual assignment before publishing.
+              need, or manual assignment before publishing.
             </p>
-            <button className="ghost-button" onClick={onOpenDashboard}>Open Dashboard</button>
+            <button className="ghost-button" type="button" onClick={onOpenDashboard}>Open Week Summary</button>
           </div>
         </article>
 
         <article className="guide-section">
           <span className="guide-number">6</span>
           <div>
-            <h3>Publish and export</h3>
+            <h3>Publish to team and export</h3>
             <p>
-              When the schedule is ready, tap Publish Reviewed Schedule. Then tap Export Whiteboard Calendar PDF to print or save a
-              posted team calendar.
+              When the schedule is ready, tap Publish to Team. Then tap Export Calendar PDF to print or save a posted team calendar.
             </p>
-            <button className="primary-button" onClick={onOpenSchedules}>Open Schedule Export</button>
+            <button className="primary-button" type="button" onClick={onOpenSchedules}>Open Schedule</button>
           </div>
         </article>
 
@@ -2124,31 +2918,11 @@ function UserGuide({
               The app saves to the current browser automatically. Use Google Drive or Export JSON when you want a recovery copy before
               making major changes or before handing the iPad to someone else.
             </p>
-            <button className="ghost-button" onClick={onOpenDrive}>Open Google Drive Backup</button>
+            <button className="ghost-button" type="button" onClick={onOpenDrive}>Open Google Drive Backup</button>
           </div>
         </article>
       </div>
     </section>
-  );
-}
-
-function WeekDateStrip({ start, end }: { start: Date; end: Date }) {
-  const days: Date[] = [];
-  let cursor = new Date(start);
-  while (cursor <= end) {
-    days.push(new Date(cursor));
-    cursor = addDays(cursor, 1);
-  }
-
-  return (
-    <div className="date-strip">
-      {days.map((date) => (
-        <div key={date.toISOString()} className="date-chip">
-          <span>{date.toLocaleDateString('en-US', { weekday: 'short' })}</span>
-          <strong>{date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</strong>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -2170,7 +2944,8 @@ function PeriodSelector({
         ].map(([mode, label]) => (
           <button
             key={mode}
-            className={period.mode === mode ? 'section-chip active' : 'section-chip'}
+            className={`${CHOICE_PILL} ${period.mode === mode ? 'section-chip active' : 'section-chip'}`}
+            type="button"
             onClick={() => setPeriod((current) => ({ ...current, mode: mode as PeriodMode }))}
           >
             {label}
