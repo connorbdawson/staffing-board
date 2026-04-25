@@ -956,7 +956,7 @@ export default function Page() {
     persistNextState(state);
   }
 
-  function autoOptimizeSchedule() {
+  function recheckSchedule() {
     refreshSchedule();
   }
 
@@ -2094,7 +2094,7 @@ export default function Page() {
                   </div>
                   <div>
                     <h2 className="text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">{formatWeekLabel(scheduleWeek.weekStart, scheduleWeek.weekEnd)}</h2>
-                    <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 md:text-base">
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 md:text-base">
                       {selectedPeriod.label} • {activeEmployees.length} active people • {scheduleWeek.schedule.totalHours.toFixed(1)} scheduled hours •{' '}
                       {underfilledCount} open shift{underfilledCount === 1 ? '' : 's'}
                     </p>
@@ -2111,17 +2111,19 @@ export default function Page() {
                     >
                       Publish to Team
                     </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
                     <button className={INLINE_BUTTON} type="button" onClick={saveScheduleDraft}>
                       Save draft
                     </button>
-                    <button className={INLINE_BUTTON_MUTED} type="button" onClick={autoOptimizeSchedule}>
-                      Fix conflicts
+                    <button className={INLINE_BUTTON_MUTED} type="button" onClick={recheckSchedule}>
+                      Recheck schedule
                     </button>
                     <button className={INLINE_BUTTON} type="button" onClick={() => window.print()}>
                       Export calendar PDF
                     </button>
                   </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-2 border-t border-slate-200 pt-4">
                     <button className={INLINE_BUTTON} type="button" onClick={() => shiftScheduleWeek(-1)}>
                       Previous week
                     </button>
