@@ -1,12 +1,15 @@
 "use client";
 
-import { cloneElement, isValidElement, useEffect, useMemo, useState, type Dispatch, type ReactElement, type ReactNode, type SetStateAction } from 'react';
+import { cloneElement, isValidElement, useEffect, useMemo, useRef, useState, type Dispatch, type ReactElement, type ReactNode, type SetStateAction } from 'react';
 import {
   DAYS,
   addDays,
   dayFullLabel,
   formatTime,
+  durationHours,
   isoDateForWeekDay,
+  deriveOpenSlots,
+  explainEmployeeEligibilityForRequirement,
   scheduleAssignmentKey,
   generateScheduleRange,
   checkScheduleFeasibility,
@@ -16,13 +19,19 @@ import {
   uuid,
   validateState,
   weekStartMonday,
+  applyStaffingPatternTemplate,
+  createTemplateFromRequirements,
+  copyStaffingRequirementsFromDay,
+  getScheduleStatus,
   type AppState,
   type BusinessHours,
   type DayKey,
   type Employee,
   type EmployeeAvailability,
+  type EmployeeEligibilityResult,
   type GeneratedSchedule,
   type GeneratedScheduleRange,
+  type OpenScheduleSlot,
   type ShiftTemplate,
   type StaffingRequirement,
 } from '../lib/staffing';
@@ -38,6 +47,7 @@ import { withBasePath } from '../lib/base-path';
 
 type Section = 'home' | 'dashboard' | 'employees' | 'availability' | 'setup' | 'schedules' | 'guide';
 type PeriodMode = 'thisWeek' | 'nextWeek' | 'twoWeeks' | 'custom';
+type PrintOptionKey = 'showByEmployee' | 'showByDay' | 'includeLaborSummary' | 'includeNotes';
 
 const SECTION_LABELS: Record<Section, string> = {
   home: 'Home',
@@ -86,6 +96,7 @@ function normalizeState(value: Partial<AppState> | null | undefined): AppState {
     businessHours: value?.businessHours ?? fallback.businessHours,
     shiftTemplates: value?.shiftTemplates ?? fallback.shiftTemplates,
     staffingRequirements: value?.staffingRequirements ?? fallback.staffingRequirements,
+    staffingPatternTemplates: value?.staffingPatternTemplates ?? fallback.staffingPatternTemplates ?? [],
     scheduleOverrides: value?.scheduleOverrides ?? {},
     schedulePublishedAt: value?.schedulePublishedAt ?? null,
     updatedAt: value?.updatedAt ?? fallback.updatedAt,
@@ -203,12 +214,41 @@ function formatMonthYear(date: Date) {
   });
 }
 
+function formatCalendarTitle(start: Date, end: Date) {
+  if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
+    return formatMonthYear(start);
+  }
+
+  if (start.getFullYear() === end.getFullYear()) {
+    return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    })}`;
+  }
+
+  return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} - ${end.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  })}`;
+}
+
 function formatDayDate(date: Date) {
   return date.toLocaleDateString('en-US', {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
   });
+}
+
+function getInitials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('');
 }
 
 function normalizeSearchValue(value: string) {
@@ -289,6 +329,45 @@ function buildWeekSections(range: GeneratedScheduleRange, requirements: Staffing
     return {
       week,
       dayCards,
+    };
+  });
+}
+
+type ScheduleReviewSlot = OpenScheduleSlot & {
+  weekLabel: string;
+  recommendations: EmployeeEligibilityResult[];
+};
+
+type ScheduleReviewWeek = {
+  weekLabel: string;
+  openSlots: ScheduleReviewSlot[];
+};
+
+function buildScheduleReviewWeeks(range: GeneratedScheduleRange, requirements: StaffingRequirement[], state: AppState): ScheduleReviewWeek[] {
+  return range.weeks.map((week) => {
+    const weekLabel = formatWeekLabel(week.weekStart, week.weekEnd);
+    const openSlots = deriveOpenSlots(week.schedule, requirements).map((slot) => {
+      const requirement = requirements.find((entry) => entry.id === slot.blockId);
+      const recommendations = requirement
+        ? explainEmployeeEligibilityForRequirement({
+            state,
+            requirement,
+            weekStart: week.weekStart,
+            currentAssignments: week.schedule.assignments,
+            employeeHours: week.schedule.employeeHours,
+          })
+        : [];
+
+      return {
+        ...slot,
+        weekLabel,
+        recommendations,
+      };
+    });
+
+    return {
+      weekLabel,
+      openSlots,
     };
   });
 }
@@ -432,13 +511,26 @@ export default function Page() {
     notes: '',
   });
   const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
+  const [staffingTemplateNameDraft, setStaffingTemplateNameDraft] = useState('');
+  const [copyDayDraft, setCopyDayDraft] = useState({
+    sourceDay: 'mon' as DayKey,
+    targetDays: ['tue', 'wed', 'thu'] as DayKey[],
+  });
+  const [scheduleLayoutMode, setScheduleLayoutMode] = useState<'board' | 'workspace'>('board');
+  const [printOptions, setPrintOptions] = useState<Record<PrintOptionKey, boolean>>({
+    showByEmployee: false,
+    showByDay: true,
+    includeLaborSummary: true,
+    includeNotes: true,
+  });
   const [requirementDraft, setRequirementDraft] = useState({
     day: 'mon' as DayKey,
-    start: '09:00',
-    end: '12:00',
+    start: '12:00',
+    end: '16:00',
     requiredStaff: 2,
     notes: '',
   });
+  const scheduleBoardScrollerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setState(getInitialState());
@@ -461,6 +553,17 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    if (activeSection !== 'schedules' || scheduleLayoutMode !== 'board') return;
+    const raf = window.requestAnimationFrame(() => {
+      const board = document.getElementById('schedule-board-focus');
+      if (!board) return;
+      const top = board.getBoundingClientRect().top + window.scrollY;
+      window.scrollTo({ top: Math.max(0, top - 16), behavior: 'auto' });
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [activeSection, scheduleLayoutMode]);
+
+  useEffect(() => {
     if (!selectedEmployeeId && state.employees[0]) {
       setSelectedEmployeeId(state.employees[0].id);
       setEmployeeDraft(state.employees[0]);
@@ -480,6 +583,15 @@ export default function Page() {
   }, [selectedEmployeeId, state.employees]);
 
   useEffect(() => {
+    const isLocalPreview = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname === '::1';
+
+    if (isLocalPreview && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((registrations) => {
+        registrations.forEach((registration) => registration.unregister().catch(() => {}));
+      });
+      return;
+    }
+
     if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
       navigator.serviceWorker.register(withBasePath('/sw.js')).catch(() => {});
     }
@@ -525,6 +637,10 @@ export default function Page() {
     [state, selectedPeriod.start, selectedPeriod.end],
   );
   const weekSections = useMemo(() => buildWeekSections(reviewedRange, state.staffingRequirements), [reviewedRange, state.staffingRequirements]);
+  const scheduleReviewWeeks = useMemo(
+    () => buildScheduleReviewWeeks(reviewedRange, state.staffingRequirements, state),
+    [reviewedRange, state],
+  );
 
   const activeCount = state.employees.filter((employee) => employee.active).length;
   const activeEmployees = state.employees.filter((employee) => employee.active);
@@ -554,6 +670,26 @@ export default function Page() {
   const totalAssignedHours = reviewedRange.totalHours;
   const totalAlerts = validationMessages.length + reviewedRange.alerts.length;
   const underfilledCount = reviewedRange.alerts.filter((alert) => alert.kind === 'understaffed').length;
+  const scheduleReviewOpenSlotCount = scheduleReviewWeeks[0]?.openSlots.length ?? 0;
+  const scheduleReviewBlockingAlerts = reviewedRange.alerts.filter((alert) => alert.kind !== 'hours');
+  const scheduleStatus = getScheduleStatus({
+    openSlots: scheduleReviewWeeks[0]?.openSlots ?? [],
+    alerts: scheduleReviewBlockingAlerts,
+    schedulePublishedAt: state.schedulePublishedAt,
+    updatedAt: state.updatedAt,
+  });
+  const scheduleStatusLabel: Record<'draft' | 'needsReview' | 'readyToPublish' | 'published', string> = {
+    draft: 'Draft',
+    needsReview: 'Needs review',
+    readyToPublish: 'Ready to publish',
+    published: 'Published',
+  };
+  const scheduleStatusTone: Record<'draft' | 'needsReview' | 'readyToPublish' | 'published', string> = {
+    draft: 'bg-slate-50 text-slate-700 ring-1 ring-slate-200',
+    needsReview: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
+    readyToPublish: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
+    published: 'bg-blue-50 text-blue-700 ring-1 ring-blue-200',
+  };
   const searchSuggestions = useMemo(
     () =>
       buildSmartSearchSuggestions({
@@ -763,6 +899,74 @@ export default function Page() {
     }
   }
 
+  function saveStaffingPatternTemplate() {
+    const name = staffingTemplateNameDraft.trim();
+    if (!name || !state.staffingRequirements.length) return;
+
+    const nextTemplate = createTemplateFromRequirements(name, buildSortedRequirements(state.staffingRequirements));
+    persistNextState({
+      ...state,
+      staffingPatternTemplates: [...state.staffingPatternTemplates, nextTemplate],
+    });
+    setStaffingTemplateNameDraft('');
+  }
+
+  function applyStaffingPattern(templateId: string) {
+    const template = state.staffingPatternTemplates.find((entry) => entry.id === templateId);
+    if (!template) return;
+    if (!window.confirm(`Replace the current staffing requirements with "${template.name}"?`)) return;
+
+    persistNextState({
+      ...state,
+      staffingRequirements: buildSortedRequirements(applyStaffingPatternTemplate(template)),
+    });
+  }
+
+  function deleteStaffingPatternTemplate(templateId: string) {
+    const template = state.staffingPatternTemplates.find((entry) => entry.id === templateId);
+    if (!template) return;
+    if (!window.confirm(`Delete the staffing template "${template.name}"?`)) return;
+
+    persistNextState({
+      ...state,
+      staffingPatternTemplates: state.staffingPatternTemplates.filter((entry) => entry.id !== templateId),
+    });
+  }
+
+  function toggleCopyDayTarget(day: DayKey) {
+    setCopyDayDraft((current) => ({
+      ...current,
+      targetDays: current.targetDays.includes(day)
+        ? current.targetDays.filter((entry) => entry !== day)
+        : [...current.targetDays, day],
+    }));
+  }
+
+  function copyStaffingRequirements() {
+    if (!copyDayDraft.targetDays.length) return;
+    const sourceCount = state.staffingRequirements.filter((requirement) => requirement.day === copyDayDraft.sourceDay).length;
+    if (!sourceCount) return;
+    const targetLabel = copyDayDraft.targetDays.map((day) => dayFullLabel(day)).join(', ');
+    if (!window.confirm(`Replace staffing requirements for ${targetLabel} with ${dayFullLabel(copyDayDraft.sourceDay)}?`)) return;
+
+    persistNextState({
+      ...state,
+      staffingRequirements: buildSortedRequirements(
+        copyStaffingRequirementsFromDay(state.staffingRequirements, copyDayDraft.sourceDay, copyDayDraft.targetDays),
+      ),
+    });
+  }
+
+  function setPrintOption(key: PrintOptionKey, value: boolean) {
+    setPrintOptions((current) => {
+      const next = { ...current, [key]: value };
+      if (!next.showByEmployee && !next.showByDay) {
+        next.showByDay = true;
+      }
+      return next;
+    });
+  }
+
   function deleteBusinessHours(day: DayKey, index: number) {
     persistNextState({
       ...state,
@@ -788,7 +992,53 @@ export default function Page() {
         },
       ].sort((a, b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0)),
     });
-    goToSection('schedules');
+  }
+
+  function deleteRequirementsForDay(day: DayKey) {
+    const count = state.staffingRequirements.filter((entry) => entry.day === day).length;
+    if (!count) return;
+    if (!window.confirm(`Remove all staffing blocks for ${dayFullLabel(day)}?`)) return;
+    persistNextState({
+      ...state,
+      staffingRequirements: state.staffingRequirements.filter((entry) => entry.day !== day),
+    });
+  }
+
+  function clearAllStaffingRequirements() {
+    if (!state.staffingRequirements.length) return;
+    if (!window.confirm('Remove all staffing blocks? This clears the current week setup.')) return;
+    persistNextState({
+      ...state,
+      staffingRequirements: [],
+    });
+  }
+
+  function addStaffingRequirement() {
+    if (!requirementDraft.day) return;
+    if (!requirementDraft.start || !requirementDraft.end || parseTime(requirementDraft.start) === null || parseTime(requirementDraft.end) === null) return;
+    if (requirementDraft.requiredStaff < 1) return;
+
+    persistNextState({
+      ...state,
+      staffingRequirements: buildSortedRequirements([
+        ...state.staffingRequirements,
+        {
+          id: uuid('req'),
+          day: requirementDraft.day,
+          start: requirementDraft.start,
+          end: requirementDraft.end,
+          requiredStaff: requirementDraft.requiredStaff,
+          notes: requirementDraft.notes.trim(),
+        },
+      ]),
+    });
+  }
+
+  function scrollScheduleBoard(direction: 'left' | 'right') {
+    const container = scheduleBoardScrollerRef.current;
+    if (!container) return;
+    const distance = direction === 'left' ? -520 : 520;
+    container.scrollBy({ left: distance, behavior: 'smooth' });
   }
 
   function deleteRequirement(id: string) {
@@ -910,6 +1160,14 @@ export default function Page() {
     goToSection('home');
   }
 
+  async function handleImportState(file: File | undefined) {
+    try {
+      await importState(file);
+    } catch {
+      alert('That file could not be imported.');
+    }
+  }
+
   function goToSection(section: Section) {
     setActiveSection(section);
     if (typeof window !== 'undefined') {
@@ -966,6 +1224,7 @@ export default function Page() {
 
   function buildScheduleNow() {
     refreshSchedule();
+    setScheduleLayoutMode('board');
     goToSection('schedules');
   }
 
@@ -1043,6 +1302,11 @@ export default function Page() {
   const saveDescriptor = state.schedulePublishedAt
     ? `Published ${new Date(state.schedulePublishedAt).toLocaleString()}`
     : `Auto-saved locally ${new Date(state.updatedAt).toLocaleString()}`;
+  const browserBackupPresent = loaded && typeof window !== 'undefined' ? Boolean(window.localStorage.getItem(BACKUP_KEY)) : false;
+  const browserBackupLabel = !loaded ? 'Loading' : browserBackupPresent ? 'Ready' : 'Missing';
+  const browserBackupDescriptor = browserBackupPresent
+    ? `Browser fallback copied ${new Date(state.updatedAt).toLocaleString()}`
+    : 'A recovery copy is written to this browser after each save.';
   const availabilityPreview = state.employees
     .filter((employee) => (state.availability[employee.id]?.weeklyAvailability.length ?? 0) > 0)
     .slice(0, 3)
@@ -1167,6 +1431,9 @@ export default function Page() {
         assignments: scheduleAssignments.filter((assignment) => assignment.day === day),
       }))
     : [];
+  const printableGeneratedAt = lastGeneratedAt ?? state.updatedAt;
+  const printablePublishedStatus = state.schedulePublishedAt ? 'Published' : 'Draft';
+  const printablePublishedAt = state.schedulePublishedAt ? new Date(state.schedulePublishedAt).toLocaleString() : 'Not published';
 
   return (
     <main className="shell app-shell">
@@ -1206,13 +1473,8 @@ export default function Page() {
               type="file"
               accept="application/json"
               onChange={async (event) => {
-                try {
-                  await importState(event.target.files?.[0]);
-                } catch {
-                  alert('That file could not be imported.');
-                } finally {
-                  event.target.value = '';
-                }
+                await handleImportState(event.target.files?.[0]);
+                event.target.value = '';
               }}
             />
           </label>
@@ -1601,10 +1863,6 @@ export default function Page() {
                       <span>View availability</span>
                       <span className="text-blue-600">→</span>
                     </button>
-                    <button className="flex items-center justify-between rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-4 text-left text-sm font-semibold text-slate-800 transition hover:-translate-y-0.5 hover:border-blue-200 hover:bg-white hover:shadow-lg focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white" type="button" onClick={() => setShowDriveMenu(true)}>
-                      <span>Back up to Google Drive</span>
-                      <span className="text-blue-600">→</span>
-                    </button>
                   </div>
                 </article>
 
@@ -1636,32 +1894,65 @@ export default function Page() {
 
                 <article className={SURFACE_CARD_PAD}>
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Recent status</p>
-                    <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Saved and published</h3>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Data safety</p>
+                    <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Local, browser, and Drive recovery</h3>
                   </div>
                   <div className="mt-5 grid gap-3">
                     <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
-                      <span className="text-sm font-medium text-slate-500">Saved here</span>
+                      <span className="text-sm font-medium text-slate-500">Local save</span>
                       <span className="text-sm font-semibold text-slate-900">{storageLabel}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
-                      <span className="text-sm font-medium text-slate-500">Auto-save</span>
-                      <span className="text-sm font-semibold text-slate-900">Always on</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
-                      <span className="text-sm font-medium text-slate-500">Last saved</span>
-                      <span className="text-sm font-semibold text-slate-900">{new Date(state.updatedAt).toLocaleString()}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
-                      <span className="text-sm font-medium text-slate-500">Published to team</span>
-                      <span className="text-sm font-semibold text-slate-900">{state.schedulePublishedAt ? new Date(state.schedulePublishedAt).toLocaleString() : 'Not yet published'}</span>
+                      <span className="text-sm font-medium text-slate-500">Browser backup</span>
+                      <span className="text-sm font-semibold text-slate-900">{browserBackupLabel}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
                       <span className="text-sm font-medium text-slate-500">Drive backup</span>
                       <span className="text-sm font-semibold text-slate-900">{driveBackupAt ? new Date(driveBackupAt).toLocaleString() : 'Not backed up'}</span>
                     </div>
+                    <div className="rounded-[20px] bg-slate-50 px-4 py-4 ring-1 ring-slate-200">
+                      <p className="text-sm font-medium text-slate-500">Status details</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900">{saveDescriptor}</p>
+                      <p className="mt-1 text-sm text-slate-600">{browserBackupDescriptor}</p>
+                      <p className="mt-1 text-sm text-slate-600" aria-live="polite">
+                        {driveMessage}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-5 grid gap-3">
+                    <div className="flex flex-wrap gap-3">
+                      <button className="ghost-button" type="button" onClick={connectDrive} disabled={!GOOGLE_CLIENT_ID}>
+                        {driveAccessToken ? 'Reconnect Drive' : 'Connect Google Drive'}
+                      </button>
+                      <button className="primary-button" type="button" onClick={backUpToDrive} disabled={!GOOGLE_CLIENT_ID}>
+                        Back up now
+                      </button>
+                      <button className="ghost-button" type="button" onClick={restoreFromDrive} disabled={!GOOGLE_CLIENT_ID}>
+                        Restore latest
+                      </button>
+                      <button className="ghost-button" type="button" onClick={() => setShowDriveMenu(true)}>
+                        Open Drive menu
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <button className="ghost-button" type="button" onClick={exportState}>
+                        Export JSON
+                      </button>
+                      <label className="ghost-button import-button">
+                        Import JSON
+                        <input
+                          type="file"
+                          accept="application/json"
+                          onChange={async (event) => {
+                            await handleImportState(event.target.files?.[0]);
+                            event.target.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
                   </div>
                 </article>
+
               </div>
             </section>
 
@@ -1762,7 +2053,7 @@ export default function Page() {
 
         {activeSection === 'employees' && (
         <section className="panel-grid two-up">
-          <article className="panel">
+          <article className="panel setup-secondary-panel">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Employees</p>
@@ -1799,7 +2090,7 @@ export default function Page() {
             </div>
           </article>
 
-          <article className="panel">
+          <article className="panel setup-primary-panel">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Editor</p>
@@ -1877,7 +2168,7 @@ export default function Page() {
             </div>
             <p className="muted">This is recurring availability that repeats every week.</p>
 
-            <div className="subpanel">
+            <div className="subpanel setup-current-blocks-panel">
               <div className="panel-header compact">
                 <div>
                   <h3>Quick add hours</h3>
@@ -1994,11 +2285,123 @@ export default function Page() {
           <article className="panel">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Shift templates</p>
-                <h2>Reusable quick adds</h2>
+                <p className="eyebrow">Staffing blocks</p>
+                <h2>Add one shift need</h2>
+                <p className="muted">This is the primary path: choose a day, time range, and how many workers you need.</p>
               </div>
             </div>
             <div className="preset-row">
+              {DEFAULT_SHIFT_TEMPLATES.map((preset) => (
+                <button
+                  key={preset.label}
+                  className="ghost-button small"
+                  type="button"
+                  onClick={() =>
+                    setRequirementDraft((current) => ({
+                      ...current,
+                      start: preset.start,
+                      end: preset.end,
+                      requiredStaff: preset.requiredStaff,
+                    }))
+                  }
+                >
+                  {preset.label} {preset.start}-{preset.end} • {preset.requiredStaff}
+                </button>
+              ))}
+            </div>
+            <div className="form-grid narrow">
+              <Field label="Day">
+                <select
+                  value={requirementDraft.day}
+                  onChange={(event) => setRequirementDraft((current) => ({ ...current, day: event.target.value as DayKey }))}
+                >
+                  {DAYS.map((day) => (
+                    <option key={day} value={day}>
+                      {dayFullLabel(day)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Start">
+                <input type="time" value={requirementDraft.start} onChange={(event) => setRequirementDraft((current) => ({ ...current, start: event.target.value }))} />
+              </Field>
+              <Field label="End">
+                <input type="time" value={requirementDraft.end} onChange={(event) => setRequirementDraft((current) => ({ ...current, end: event.target.value }))} />
+              </Field>
+              <Field label="Workers needed">
+                <input type="number" min="1" step="1" value={requirementDraft.requiredStaff} onChange={(event) => setRequirementDraft((current) => ({ ...current, requiredStaff: Number(event.target.value) }))} />
+              </Field>
+              <Field label="Notes">
+                <input value={requirementDraft.notes} onChange={(event) => setRequirementDraft((current) => ({ ...current, notes: event.target.value }))} />
+              </Field>
+            </div>
+            <div className="inline-actions">
+              <button className="primary-button" type="button" onClick={addStaffingRequirement}>
+                Add staffing block
+              </button>
+            </div>
+
+            <div className="subpanel">
+              <div className="panel-header compact">
+                <div>
+                  <p className="eyebrow">Current blocks</p>
+                  <h3>{state.staffingRequirements.length} staffing block{state.staffingRequirements.length === 1 ? '' : 's'}</h3>
+                  <p className="muted">Review what exists now, remove a single block, or clear an entire day in one step.</p>
+                </div>
+                <button className="ghost-button" type="button" onClick={clearAllStaffingRequirements} disabled={!state.staffingRequirements.length}>
+                  Clear all shifts
+                </button>
+              </div>
+              <div className="stack">
+                {DAYS.map((day) => {
+                  const dayBlocks = state.staffingRequirements.filter((requirement) => requirement.day === day);
+                  if (!dayBlocks.length) return null;
+                  return (
+                    <div key={day} className="subpanel setup-day-panel">
+                      <div className="panel-header compact">
+                        <div>
+                          <p className="eyebrow">{dayFullLabel(day)}</p>
+                          <h3>{dayBlocks.length} block{dayBlocks.length === 1 ? '' : 's'}</h3>
+                        </div>
+                        <button className="ghost-button small" type="button" onClick={() => deleteRequirementsForDay(day)}>
+                          Clear day
+                        </button>
+                      </div>
+                      <div className="scroll-list">
+                        {dayBlocks.map((block) => (
+                          <div key={block.id} className="requirement-row">
+                            <div>
+                              <strong>
+                                {block.start} - {block.end}
+                              </strong>
+                              <p className="muted">{block.requiredStaff} workers</p>
+                              <p className="muted">{block.notes || 'Coverage block'}</p>
+                            </div>
+                            <div className="row-actions">
+                              <button className="ghost-button small" type="button" onClick={() => deleteRequirement(block.id)}>
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!state.staffingRequirements.length && <p className="muted">No staffing blocks yet. Use the composer above to add one.</p>}
+              </div>
+            </div>
+
+            <details className="subpanel setup-advanced-panel">
+              <summary className="panel-header compact cursor-pointer list-none">
+                <div>
+                  <p className="eyebrow">Advanced reuse</p>
+                  <h3>Templates and copy tools</h3>
+                  <p className="muted">Optional helpers for people who want to reuse or snapshot a set of blocks.</p>
+                </div>
+              </summary>
+              <div className="mt-4 space-y-6">
+            <div className="preset-row setup-template-preset-row">
               {DEFAULT_SHIFT_TEMPLATES.map((preset) => (
                   <button
                     key={preset.label}
@@ -2080,17 +2483,150 @@ export default function Page() {
                 </div>
               ))}
             </div>
+            <div className="spacer" />
+            <div className="subpanel setup-template-panel">
+              <div className="panel-header compact">
+                <div>
+                  <p className="eyebrow">Staffing templates</p>
+                  <h3>Snapshot current requirements</h3>
+                  <p className="muted">Save the current staffing blocks, then restore them later with one click.</p>
+                </div>
+              </div>
+              <div className="form-inline">
+                <input
+                  value={staffingTemplateNameDraft}
+                  onChange={(event) => setStaffingTemplateNameDraft(event.target.value)}
+                  placeholder="Template name"
+                />
+                <button className="primary-button" type="button" onClick={saveStaffingPatternTemplate} disabled={!staffingTemplateNameDraft.trim() || !state.staffingRequirements.length}>
+                  Save current blocks
+                </button>
+              </div>
+              <div className="stack">
+                {state.staffingPatternTemplates.length ? (
+                  state.staffingPatternTemplates.map((template) => {
+                    const preview = template.requirements
+                      .slice(0, 3)
+                      .map((requirement) => `${dayFullLabel(requirement.day)} ${requirement.start}-${requirement.end} (${requirement.requiredStaff})`)
+                      .join(' · ');
+                    return (
+                      <div key={template.id} className="day-row">
+                        <div>
+                          <strong>{template.name}</strong>
+                          <p className="muted">
+                            {template.requirements.length} block{template.requirements.length === 1 ? '' : 's'}
+                            {preview ? ` • ${preview}` : ''}
+                          </p>
+                        </div>
+                        <div className="row-actions">
+                          <button className="ghost-button small" type="button" onClick={() => applyStaffingPattern(template.id)}>
+                            Apply
+                          </button>
+                          <button className="ghost-button small" type="button" onClick={() => deleteStaffingPatternTemplate(template.id)}>
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="muted">No staffing templates saved yet. Save the current block set to reuse it later.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="subpanel setup-copy-panel">
+              <div className="panel-header compact">
+                <div>
+                  <p className="eyebrow">Copy day</p>
+                  <h3>Reuse one day across the week</h3>
+                  <p className="muted">Copy the selected source day into one or more target days with fresh ids.</p>
+                </div>
+              </div>
+              <div className="form-inline">
+                <select
+                  value={copyDayDraft.sourceDay}
+                  onChange={(event) =>
+                    setCopyDayDraft((current) => ({
+                      ...current,
+                      sourceDay: event.target.value as DayKey,
+                      targetDays: current.targetDays.filter((day) => day !== (event.target.value as DayKey)),
+                    }))
+                  }
+                >
+                  {DAYS.map((day) => (
+                    <option key={day} value={day}>
+                      {dayFullLabel(day)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={copyStaffingRequirements}
+                  disabled={!copyDayDraft.targetDays.length || !state.staffingRequirements.some((requirement) => requirement.day === copyDayDraft.sourceDay)}
+                >
+                  Copy to selected days
+                </button>
+              </div>
+              <div className="stack">
+                <div>
+                  <p className="muted">Target days</p>
+                  <div className="preset-row">
+                    {DAYS.map((day) => {
+                      const isSource = day === copyDayDraft.sourceDay;
+                      const isSelected = copyDayDraft.targetDays.includes(day);
+                      return (
+                        <button
+                          key={day}
+                          className="ghost-button small"
+                          type="button"
+                          onClick={() => toggleCopyDayTarget(day)}
+                          disabled={isSource}
+                          aria-pressed={isSelected}
+                        >
+                          {dayFullLabel(day)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <p className="muted">
+                  Copying from {dayFullLabel(copyDayDraft.sourceDay)} will replace the selected target days and leave the rest of the week untouched.
+                </p>
+              </div>
+            </div>
+              </div>
+            </details>
           </article>
         </section>
         )}
 
         {activeSection === 'schedules' && scheduleWeek && (
-          <section className="space-y-6">
-            <header className="sticky top-4 z-30 rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-sm backdrop-blur xl:top-6">
+          <section className={`space-y-6 schedule-page ${scheduleLayoutMode === 'board' ? 'schedule-page--board-focus' : 'schedule-page--workspace'}`}>
+            <header className="rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-sm backdrop-blur schedule-hero">
               <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(340px,420px)] xl:items-start">
-                <div className="space-y-4">
-                  <div className="inline-flex items-center rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-blue-700">
-                    Weekly schedule
+                <div className="space-y-4 schedule-hero-copy">
+                  <div className="flex flex-wrap items-center gap-2 schedule-mode-switch">
+                    <div className="inline-flex items-center rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-blue-700">
+                      Weekly schedule
+                    </div>
+                    <div className="inline-flex rounded-full border border-slate-200 bg-white p-1 shadow-sm">
+                      <button
+                        className={scheduleLayoutMode === 'board' ? 'inline-flex rounded-full bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm' : 'inline-flex rounded-full px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:text-slate-950'}
+                        type="button"
+                        onClick={() => setScheduleLayoutMode('board')}
+                      >
+                        Board focus
+                      </button>
+                      <button
+                        className={scheduleLayoutMode === 'workspace' ? 'inline-flex rounded-full bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm' : 'inline-flex rounded-full px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:text-slate-950'}
+                        type="button"
+                        onClick={() => setScheduleLayoutMode('workspace')}
+                      >
+                        Workspace
+                      </button>
+                    </div>
                   </div>
                   <div>
                     <h2 className="text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">{formatWeekLabel(scheduleWeek.weekStart, scheduleWeek.weekEnd)}</h2>
@@ -2099,7 +2635,7 @@ export default function Page() {
                       {underfilledCount} open shift{underfilledCount === 1 ? '' : 's'}
                     </p>
                   </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-2 schedule-hero-primary-actions">
                     <button className={INLINE_BUTTON_PRIMARY} type="button" onClick={buildScheduleNow}>
                       Build schedule
                     </button>
@@ -2112,7 +2648,7 @@ export default function Page() {
                       Publish to Team
                     </button>
                   </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-2 schedule-hero-secondary-actions">
                     <button className={INLINE_BUTTON} type="button" onClick={saveScheduleDraft}>
                       Save draft
                     </button>
@@ -2123,7 +2659,7 @@ export default function Page() {
                       Export calendar PDF
                     </button>
                   </div>
-                  <div className="flex flex-wrap gap-2 border-t border-slate-200 pt-4">
+                  <div className="flex flex-wrap gap-2 border-t border-slate-200 pt-4 schedule-hero-period-actions">
                     <button className={INLINE_BUTTON} type="button" onClick={() => shiftScheduleWeek(-1)}>
                       Previous week
                     </button>
@@ -2136,7 +2672,7 @@ export default function Page() {
                   </div>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2 schedule-hero-metrics schedule-hero-context">
                   <div className={INLINE_CARD}>
                     <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Hours</p>
                     <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{scheduleWeek.schedule.totalHours.toFixed(1)}</p>
@@ -2161,9 +2697,220 @@ export default function Page() {
               </div>
             </header>
 
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+            <article className={`${SURFACE_CARD_PAD} print-view-panel schedule-review-panel`}>
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between schedule-review-header">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Schedule review</p>
+                  <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{scheduleStatusLabel[scheduleStatus]}</h3>
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
+                    Review open slots, assign the best-fit employee, and clear blocking alerts before publishing the week.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span
+                    className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${scheduleStatusTone[scheduleStatus]}`}
+                  >
+                    {scheduleStatusLabel[scheduleStatus]}
+                  </span>
+                  <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
+                    {scheduleReviewOpenSlotCount} open slot{scheduleReviewOpenSlotCount === 1 ? '' : 's'}
+                  </span>
+                  <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-slate-200">
+                    {scheduleReviewBlockingAlerts.length} blocking alert{scheduleReviewBlockingAlerts.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-3 md:grid-cols-3 schedule-review-stats">
+                <div className={INLINE_CARD}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Open slots</p>
+                  <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{scheduleReviewOpenSlotCount}</p>
+                  <p className="text-sm text-slate-500">Require manual coverage</p>
+                </div>
+                <div className={INLINE_CARD}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Blocking alerts</p>
+                  <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{scheduleReviewBlockingAlerts.length}</p>
+                  <p className="text-sm text-slate-500">Validation issues to resolve</p>
+                </div>
+                <div className={INLINE_CARD}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Review scope</p>
+                  <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{reviewedRange.weeks.length}</p>
+                  <p className="text-sm text-slate-500">Week{reviewedRange.weeks.length === 1 ? '' : 's'} in view</p>
+                </div>
+              </div>
+
+              {scheduleReviewWeeks.some((week) => week.openSlots.length > 0) ? (
+                <div className="mt-6 space-y-4">
+                  {scheduleReviewWeeks.map((week) =>
+                    week.openSlots.length ? (
+                      <section key={week.weekLabel} className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-4 shadow-sm">
+                        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-950">{week.weekLabel}</p>
+                            <p className="text-sm text-slate-500">
+                              {week.openSlots.length} open slot{week.openSlots.length === 1 ? '' : 's'}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="mt-4 space-y-3">
+                          {week.openSlots.map((slot) => {
+                            const eligibleEmployees = slot.recommendations.filter((result) => result.eligible).slice(0, 3);
+                            const ineligibleEmployees = slot.recommendations.filter((result) => !result.eligible);
+                            return (
+                              <div key={slot.id} className="rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm">
+                                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                                  <div className="space-y-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <p className="text-base font-semibold tracking-tight text-slate-950">
+                                        {dayFullLabel(slot.day)} {formatRange(slot.start, slot.end)}
+                                      </p>
+                                      <span className="status-pill">{slot.role || 'Coverage'}</span>
+                                    </div>
+                                    <p className="text-sm text-slate-500">
+                                      {slot.weekLabel} • Required {slot.requiredStaff} • Assigned {slot.assignedStaff} • Open {slot.openCount}
+                                    </p>
+                                  </div>
+                                  <div className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">
+                                    Needs assignment
+                                  </div>
+                                </div>
+
+                                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
+                                  <div className="space-y-3">
+                                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Recommended</p>
+                                    {eligibleEmployees.length ? (
+                                      eligibleEmployees.map((employee) => (
+                                        <div
+                                          key={employee.employeeId}
+                                          className="flex flex-col gap-3 rounded-[18px] border border-emerald-200 bg-emerald-50 px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between"
+                                        >
+                                          <div>
+                                            <p className="text-sm font-semibold text-emerald-900">{employee.employeeName}</p>
+                                            <p className="text-xs text-emerald-700">
+                                              {employee.projectedHours.toFixed(1)} / {employee.maxAllowedWeeklyHours} hrs • priority {employee.priorityLevel}
+                                            </p>
+                                          </div>
+                                          <button
+                                            className={INLINE_BUTTON_SUCCESS}
+                                            type="button"
+                                            onClick={() =>
+                                              setScheduleOverride(
+                                                scheduleAssignmentKey({
+                                                  date: slot.date,
+                                                  blockId: slot.blockId,
+                                                  slotIndex: slot.slotIndex,
+                                                }),
+                                                employee.employeeId,
+                                              )
+                                            }
+                                          >
+                                            Assign
+                                          </button>
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                                        No eligible employees for this slot.
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="space-y-3">
+                                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Ineligible</p>
+                                    {ineligibleEmployees.length ? (
+                                      <div className="space-y-2">
+                                        {ineligibleEmployees.slice(0, 4).map((employee) => (
+                                          <div key={employee.employeeId} className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+                                            <p className="text-sm font-semibold text-slate-900">{employee.employeeName}</p>
+                                            <p className="text-xs leading-5 text-slate-500">{employee.reason}</p>
+                                          </div>
+                                        ))}
+                                        {ineligibleEmployees.length > 4 && (
+                                          <p className="text-xs font-medium text-slate-500">+{ineligibleEmployees.length - 4} more ineligible employee(s)</p>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <div className="rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                                        Everyone currently qualifies.
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    ) : null,
+                  )}
+                </div>
+              ) : (
+                <div className="mt-6 rounded-[24px] border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-800">
+                  No open slots remain in the reviewed schedule. The week is ready for final checks.
+                </div>
+              )}
+            </article>
+
+            <article className={`${SURFACE_CARD_PAD} print-view-panel schedule-print-panel`}>
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Print view</p>
+                  <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">What will print</h3>
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
+                    Choose the printable layout, then use the existing print action to export the selected date range.
+                  </p>
+                </div>
+                <button className={INLINE_BUTTON} type="button" onClick={() => window.print()}>
+                  Print now
+                </button>
+              </div>
+
+              <div className="mt-5 grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+                <div className="space-y-3 schedule-print-controls">
+                  <PrintToggle
+                    label="Show by employee"
+                    description="Group shifts by team member and their assigned hours."
+                    checked={printOptions.showByEmployee}
+                    onChange={(checked) => setPrintOption('showByEmployee', checked)}
+                  />
+                  <PrintToggle
+                    label="Show by day"
+                    description="Group shifts by weekday for a clean calendar layout."
+                    checked={printOptions.showByDay}
+                    onChange={(checked) => setPrintOption('showByDay', checked)}
+                  />
+                  <PrintToggle
+                    label="Include labor summary"
+                    description="Show total hours, open slots, and schedule status at the top."
+                    checked={printOptions.includeLaborSummary}
+                    onChange={(checked) => setPrintOption('includeLaborSummary', checked)}
+                  />
+                  <PrintToggle
+                    label="Include notes"
+                    description="Show staffing notes beneath each shift."
+                    checked={printOptions.includeNotes}
+                    onChange={(checked) => setPrintOption('includeNotes', checked)}
+                  />
+                </div>
+
+                <div className="rounded-[24px] border border-slate-200 bg-white p-3 shadow-sm schedule-print-preview">
+                  <PrintableScheduleCalendar
+                    range={reviewedRange}
+                    selectedPeriod={selectedPeriod}
+                    statusLabel={scheduleStatusLabel[scheduleStatus]}
+                    generatedAt={lastGeneratedAt ?? state.updatedAt}
+                    publishedAt={state.schedulePublishedAt}
+                    openSlots={scheduleReviewWeeks.flatMap((week) => week.openSlots)}
+                    options={printOptions}
+                  />
+                </div>
+              </div>
+            </article>
+
+            <div className="schedule-schedule-layout grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
               <div className="space-y-6">
-                <article id="schedule-quick-add" className={SURFACE_CARD_PAD}>
+                <div className="space-y-6 schedule-support-panels">
+                <article id="schedule-quick-add" className={`${SURFACE_CARD_PAD} schedule-quick-add-panel`}>
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Quick add</p>
@@ -2204,7 +2951,7 @@ export default function Page() {
                   </div>
                 </article>
 
-                <div className="grid gap-3 lg:hidden">
+                <div className="grid gap-3 lg:hidden schedule-mobile-board-panel">
                   <div className="rounded-[24px] border border-slate-200/80 bg-white/95 p-4 shadow-sm">
                     <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Compact view</p>
                     <p className="mt-2 text-sm leading-6 text-slate-500">
@@ -2285,36 +3032,87 @@ export default function Page() {
                     </article>
                   ))}
                 </div>
+                </div>
 
-                <article className="hidden overflow-hidden rounded-[28px] border border-slate-200/80 bg-white/90 shadow-sm lg:block">
-                  <div className="flex flex-col gap-3 border-b border-slate-200 px-5 py-5 lg:flex-row lg:items-end lg:justify-between">
+                <article
+                  id="schedule-board-focus"
+                  className={`${scheduleLayoutMode === 'board' ? 'block' : 'hidden lg:block'} overflow-hidden rounded-[28px] border border-slate-200/80 bg-white/90 shadow-sm schedule-board-panel`}
+                >
+                  <div className="schedule-board-header flex flex-col gap-3 border-b border-slate-200 px-5 py-5 lg:flex-row lg:items-end lg:justify-between">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Schedule board</p>
                       <h3 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">Employees across Mon-Sun</h3>
                       <p className="mt-2 text-sm leading-6 text-slate-500">Tap a shift to edit it, or drop it on another person to reassign it.</p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      <span className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 ring-1 ring-blue-200">Blue = active</span>
-                      <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">Amber = risk</span>
-                      <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">Green = good</span>
+                  <div className="flex flex-wrap gap-2">
+                    <span className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 ring-1 ring-blue-200">Blue = active</span>
+                    <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">Amber = risk</span>
+                    <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">Green = good</span>
+                  </div>
+                </div>
+
+                <div className="schedule-board-guide border-b border-slate-200 bg-slate-50/70 px-5 py-4">
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Board guide</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-950">Rows = employees</p>
+                        <p className="text-sm text-slate-500">Columns = days in the selected week</p>
+                      </div>
+                      <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Week context</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-950">{formatWeekLabel(scheduleWeek.weekStart, scheduleWeek.weekEnd)}</p>
+                        <p className="text-sm text-slate-500">{selectedPeriod.label}</p>
+                      </div>
+                      <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Track focus</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-950">{activeEmployees.length} active employees</p>
+                        <p className="text-sm text-slate-500">{scheduleWeek.schedule.totalHours.toFixed(1)} scheduled hours</p>
+                    </div>
+                  </div>
+                </div>
+
+                  <div className="schedule-board-toolbar border-b border-slate-200 bg-slate-50/80 px-5 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Horizontal pan</p>
+                        <p className="text-sm text-slate-500">Use the arrows to move left and right across the board.</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button className={INLINE_BUTTON} type="button" onClick={() => scrollScheduleBoard('left')}>
+                          Scroll left
+                        </button>
+                        <button className={INLINE_BUTTON} type="button" onClick={() => scrollScheduleBoard('right')}>
+                          Scroll right
+                        </button>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="overflow-x-auto">
+                  <div ref={scheduleBoardScrollerRef} className="overflow-x-auto">
                     <div className="min-w-[1280px]">
                       <div
                         className="grid border-b border-slate-200 bg-slate-50/80"
-                        style={{ gridTemplateColumns: 'minmax(240px, 320px) repeat(7, minmax(170px, 1fr))' }}
+                        style={{
+                          gridTemplateColumns:
+                            scheduleLayoutMode === 'board'
+                              ? 'minmax(220px, 280px) repeat(7, minmax(150px, 1fr))'
+                              : 'minmax(240px, 320px) repeat(7, minmax(170px, 1fr))',
+                        }}
                       >
-                        <div className="sticky left-0 z-20 border-r border-slate-200 bg-slate-50/95 px-4 py-4">
+                        <div className="border-r border-slate-200 bg-slate-100/90 px-4 py-4">
                           <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Employee</p>
                           <p className="mt-1 text-sm font-semibold text-slate-900">Weekly load</p>
                         </div>
-                        {DAYS.map((day) => {
+                        {DAYS.map((day, dayIndex) => {
                           const summary = scheduleDaySummaries[day];
                           const date = addDays(scheduleWeek.weekStart, DAYS.indexOf(day));
                           return (
-                            <div key={day} className="border-r border-slate-200 px-4 py-4 last:border-r-0">
+                            <div
+                              key={day}
+                              className={`border-r border-slate-200 px-4 py-4 last:border-r-0 ${
+                                dayIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'
+                              }`}
+                            >
                               <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">{dayFullLabel(day)}</p>
                               <p className="mt-1 text-sm font-semibold text-slate-950">{formatDayDate(date)}</p>
                               <div className="mt-3 flex flex-wrap gap-2">
@@ -2331,27 +3129,39 @@ export default function Page() {
                       </div>
 
                       <div className="divide-y divide-slate-200">
-                        {activeEmployees.map((employee) => {
+                        {activeEmployees.map((employee, employeeIndex) => {
                           const employeeHours = reviewedRange.employeeHours[employee.id] ?? 0;
                           const availability = state.availability[employee.id] ?? createEmptyAvailability();
                           return (
                             <div
                               key={employee.id}
-                              className="grid min-h-[112px]"
-                              style={{ gridTemplateColumns: 'minmax(240px, 320px) repeat(7, minmax(170px, 1fr))' }}
+                              className={`schedule-board-row grid ${scheduleLayoutMode === 'board' ? 'min-h-[72px]' : 'min-h-[88px]'} ${
+                                employeeIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/35'
+                              }`}
+                              style={{
+                                gridTemplateColumns:
+                                  scheduleLayoutMode === 'board'
+                                    ? 'minmax(220px, 280px) repeat(7, minmax(150px, 1fr))'
+                                    : 'minmax(240px, 320px) repeat(7, minmax(170px, 1fr))',
+                              }}
                             >
                               <button
-                                className={`sticky left-0 z-10 border-r border-slate-200 px-4 py-4 text-left transition ${
+                                className={`schedule-employee-cell border-r border-slate-200 text-left transition ${
                                   selectedScheduleEmployee?.id === employee.id ? 'bg-blue-50/95' : 'bg-white/95 hover:bg-slate-50'
-                                }`}
+                                } ${scheduleLayoutMode === 'board' ? 'px-3 py-3' : 'px-4 py-4'}`}
                                 onClick={() => selectScheduleEmployee(employee.id)}
                               >
                                 <div className="flex items-start justify-between gap-3">
-                                  <div>
-                                    <p className="text-base font-semibold text-slate-950">{employee.name}</p>
-                                    <p className="mt-1 text-sm text-slate-500">
+                                  <div className="flex min-w-0 items-start gap-3">
+                                    <div className={`flex shrink-0 items-center justify-center rounded-2xl bg-blue-50 font-semibold text-blue-700 ring-1 ring-blue-100 ${scheduleLayoutMode === 'board' ? 'h-8 w-8 text-xs' : 'h-10 w-10 text-sm'}`}>
+                                      {getInitials(employee.name)}
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className="truncate text-base font-semibold text-slate-950">{employee.name}</p>
+                                    <p className={`mt-1 text-sm text-slate-500 ${scheduleLayoutMode === 'board' ? 'hidden xl:block' : ''}`}>
                                       {employeeHours.toFixed(1)} / {employee.maxAllowedWeeklyHours} hrs
                                     </p>
+                                    </div>
                                   </div>
                                   <span
                                     className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${
@@ -2403,24 +3213,27 @@ export default function Page() {
                                 return (
                                   <div
                                     key={`${employee.id}-${day}`}
-                                    className={`min-h-[112px] border-r border-slate-200 px-3 py-3 last:border-r-0 ${
+                                    className={`schedule-day-cell border-r border-slate-200 last:border-r-0 ${
+                                      scheduleLayoutMode === 'board' ? 'min-h-[88px] px-2 py-2' : 'min-h-[112px] px-3 py-3'
+                                    } ${
                                       !canWorkAny ? 'bg-rose-50/60' : 'bg-white'
-                                    }`}
+                                    } ${DAYS.indexOf(day) % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}
                                     onDragOver={(event) => event.preventDefault()}
                                     onDrop={() => moveDraggedAssignmentToEmployee(employee.id)}
                                   >
                                     <button
-                                      className="flex min-h-24 w-full flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-center text-sm font-semibold text-slate-500 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                                      className={`schedule-add-shift flex w-full flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50 text-center font-semibold text-slate-500 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white ${
+                                        scheduleLayoutMode === 'board' ? 'min-h-20 px-2 py-2 text-xs' : 'min-h-24 px-3 py-3 text-sm'
+                                      }`}
                                       type="button"
                                       onClick={() => jumpToScheduleDay(day)}
                                     >
                                       <span>Add shift</span>
-                                      <span className="mt-1 text-xs font-medium text-slate-400">{formatDayDate(new Date(date))}</span>
+                                      <span className={`mt-1 font-medium text-slate-400 ${scheduleLayoutMode === 'board' ? 'text-[10px]' : 'text-[11px]'}`}>{formatDayDate(new Date(date))}</span>
                                     </button>
 
-                                    <div className="mt-3 space-y-2">
+                                    <div className={`mt-2 flex flex-wrap ${scheduleLayoutMode === 'board' ? 'gap-1.5' : 'gap-2'}`}>
                                       {assignments.map((assignment) => {
-                                        const requirement = requirements.find((entry) => entry.id === assignment.blockId);
                                         const conflict = canWorkBlock(
                                           assignment.employeeId,
                                           { day: assignment.day, start: assignment.start, end: assignment.end, date: assignment.date },
@@ -2440,26 +3253,20 @@ export default function Page() {
                                             draggable
                                             onDragStart={() => setDraggedScheduleAssignment(assignment.id)}
                                             onClick={() => selectScheduleAssignment(assignment.id, employee.id)}
-                                            className={`group flex w-full flex-col gap-1 rounded-[18px] border px-3 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg ${assignmentTone}`}
+                                            className={`schedule-assignment-chip group inline-flex items-center gap-2 rounded-full border text-left font-semibold leading-none shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
+                                              scheduleLayoutMode === 'board' ? 'px-2.5 py-1.5 text-[11px]' : 'px-3 py-2 text-sm'
+                                            } ${assignmentTone}`}
+                                            aria-label={`${dayFullLabel(assignment.day)} ${formatRange(assignment.start, assignment.end)} for ${employee.name}`}
                                           >
-                                            <div className="flex items-center justify-between gap-2">
-                                              <span className="text-sm font-semibold">{formatRange(assignment.start, assignment.end)}</span>
-                                              <span className="rounded-full bg-white/60 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]">
-                                                {assignment.slotIndex + 1}/{assignment.requiredStaff}
-                                              </span>
-                                            </div>
-                                            <p className="text-xs font-medium opacity-80">{requirement?.notes || 'Coverage shift'}</p>
-                                            <div className="flex flex-wrap gap-2">
-                                              <span className="rounded-full bg-white/70 px-2 py-1 text-[11px] font-semibold">Drag me</span>
-                                              {!conflict.allowed && <span className="rounded-full bg-rose-100 px-2 py-1 text-[11px] font-semibold text-rose-700">Conflict</span>}
-                                            </div>
+                                            <span className="text-[13px] font-semibold">{formatRange(assignment.start, assignment.end)}</span>
+                                            {!conflict.allowed && <span className="rounded-full bg-white/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]">Conflict</span>}
                                           </button>
                                         );
                                       })}
                                     </div>
 
                                     {rowConflicts.length > 0 && (
-                                      <div className="mt-3 rounded-[16px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                                      <div className="schedule-row-conflict mt-3 rounded-[16px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
                                         Availability conflict
                                       </div>
                                     )}
@@ -2474,18 +3281,9 @@ export default function Page() {
                   </div>
                 </article>
 
-                <article className="hidden printable-area">
-                  <PrintableScheduleCalendar
-                    range={reviewedRange}
-                    periodStart={selectedPeriod.start}
-                    periodEnd={selectedPeriod.end}
-                    selectedPeriodLabel={selectedPeriod.label}
-                    totalAlerts={totalAlerts}
-                  />
-                </article>
               </div>
 
-              <aside className="space-y-6 xl:sticky xl:top-6">
+              <aside className={`space-y-6 schedule-side-panels ${scheduleLayoutMode === 'board' ? 'hidden xl:block' : ''}`}>
                 <article className={SURFACE_CARD}>
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -2652,7 +3450,7 @@ export default function Page() {
               </aside>
             </div>
 
-            <div className="sticky bottom-4 z-30 mx-auto grid max-w-5xl gap-2 rounded-[24px] border border-slate-200/80 bg-white/95 p-3 shadow-xl backdrop-blur lg:hidden">
+            <div className="sticky bottom-4 z-30 mx-auto grid max-w-5xl gap-2 rounded-[24px] border border-slate-200/80 bg-white/95 p-3 shadow-xl backdrop-blur lg:hidden schedule-mobile-actions">
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <button className={INLINE_BUTTON_PRIMARY} type="button" onClick={buildScheduleNow}>
                   Build
@@ -2680,6 +3478,20 @@ export default function Page() {
           onOpenDashboard={() => goToSection('dashboard')}
           onOpenDrive={() => setShowDriveMenu(true)}
         />
+        )}
+
+        {activeSection === 'schedules' && scheduleWeek && (
+          <article className="hidden printable-area">
+            <PrintableScheduleCalendar
+              range={reviewedRange}
+              selectedPeriod={selectedPeriod}
+              statusLabel={scheduleStatusLabel[scheduleStatus]}
+              generatedAt={lastGeneratedAt ?? state.updatedAt}
+              publishedAt={state.schedulePublishedAt}
+              openSlots={scheduleReviewWeeks.flatMap((week) => week.openSlots)}
+              options={printOptions}
+            />
+          </article>
         )}
       </div>
     </main>
@@ -2817,85 +3629,235 @@ function RuleList({
 
 function PrintableScheduleCalendar({
   range,
-  periodStart,
-  periodEnd,
-  selectedPeriodLabel,
-  totalAlerts,
+  selectedPeriod,
+  statusLabel,
+  generatedAt,
+  publishedAt,
+  openSlots,
+  options,
 }: {
-  range: GeneratedScheduleRange;
-  periodStart: Date;
-  periodEnd: Date;
-  selectedPeriodLabel: string;
-  totalAlerts: number;
+  range: GeneratedScheduleRange | null | undefined;
+  selectedPeriod: { start: Date; end: Date; label: string };
+  statusLabel: string;
+  generatedAt: string;
+  publishedAt: string | null;
+  openSlots: OpenScheduleSlot[];
+  options: Record<PrintOptionKey, boolean>;
 }) {
-  const calendarStart = new Date(periodStart);
-  calendarStart.setHours(12, 0, 0, 0);
-  const calendarEnd = new Date(periodEnd);
-  calendarEnd.setHours(12, 0, 0, 0);
-  const leadingBlankDays = calendarStart.getDay();
-  const calendarDays: Date[] = [];
-  for (let cursor = new Date(calendarStart); cursor <= calendarEnd; cursor = addDays(cursor, 1)) {
-    calendarDays.push(new Date(cursor));
+  if (!range?.weeks.length) {
+    return (
+      <section className="calendar-stack">
+        <article className="week-card">
+          <p className="eyebrow">Staffing Board</p>
+          <h2>Printable schedule</h2>
+          <p className="muted">No schedule is available for the selected date range.</p>
+        </article>
+      </section>
+    );
   }
-  const trailingBlankDays = (7 - ((leadingBlankDays + calendarDays.length) % 7)) % 7;
-  const assignmentsByDate = new Map<string, GeneratedScheduleRange['weeks'][number]['schedule']['assignments']>();
 
+  const assignments = range.weeks.flatMap((week) => week.schedule.assignments).sort(
+    (a, b) => (DAYS.indexOf(a.day) - DAYS.indexOf(b.day)) || (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0),
+  );
+  const calendarStart = weekStartMonday(selectedPeriod.start);
+  const calendarEnd = addDays(weekStartMonday(selectedPeriod.end), 6);
+  const calendarDays: Array<{
+    date: Date;
+    day: DayKey;
+    inRange: boolean;
+    items: typeof assignments;
+    openItems: OpenScheduleSlot[];
+  }> = [];
+  for (let cursor = new Date(calendarStart); cursor <= calendarEnd; cursor = addDays(cursor, 1)) {
+    const dateKey = cursor.toISOString().slice(0, 10);
+    const day = DAYS[((cursor.getDay() + 6) % 7) as number];
+    calendarDays.push({
+      date: new Date(cursor),
+      day,
+      inRange: cursor.getTime() >= selectedPeriod.start.getTime() && cursor.getTime() <= selectedPeriod.end.getTime(),
+      items: assignments.filter((assignment) => assignment.date === dateKey),
+      openItems: openSlots.filter((slot) => slot.date === dateKey),
+    });
+  }
+  const calendarRowCount = Math.max(1, Math.ceil(calendarDays.length / 7));
+  const calendarCellHeight = calendarRowCount >= 6 ? '0.82in' : calendarRowCount === 5 ? '1.02in' : '1.15in';
+  const notesByBlockId = new Map<string, string>();
   range.weeks.forEach((week) => {
-    week.schedule.assignments.forEach((assignment) => {
-      const current = assignmentsByDate.get(assignment.date) ?? [];
-      current.push(assignment);
-      assignmentsByDate.set(assignment.date, current);
+    DAYS.forEach((day) => {
+      week.schedule.daySummaries[day].blocks.forEach((block) => {
+        if (block.notes) notesByBlockId.set(block.id, block.notes);
+      });
     });
   });
+  const employeeMap = assignments.reduce((map, assignment) => {
+    const existing = map.get(assignment.employeeId);
+    if (existing) {
+      existing.assignments.push(assignment);
+      existing.totalHours += durationHours(assignment.start, assignment.end);
+    } else {
+      map.set(assignment.employeeId, {
+        employeeId: assignment.employeeId,
+        employeeName: assignment.employeeName,
+        assignments: [assignment],
+        totalHours: durationHours(assignment.start, assignment.end),
+      });
+    }
+    return map;
+  }, new Map<string, { employeeId: string; employeeName: string; assignments: typeof assignments; totalHours: number }>());
+  const employeeGroups = Array.from(employeeMap.values()).sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+
+  const formatPrintTimestamp = (value: string | null) => (value ? new Date(value).toLocaleString() : 'Not published');
 
   return (
-    <div className="month-export">
-      <div className="month-export-title">
-        <h2>Month-at-a-Glance Schedule</h2>
-      </div>
-      <div className="month-export-meta">
-        <div>
-          <span>Month</span>
-          <strong>{formatMonthYear(calendarStart)}</strong>
-        </div>
-        <strong>{selectedPeriodLabel}</strong>
-        <span>{totalAlerts} issue(s)</span>
-      </div>
-      <div className="month-calendar">
-        {['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => (
+    <div className="month-export print-sheet">
+      <header className="month-export-title">
+        <p className="print-brand">Staffing Board</p>
+        <h2>{formatCalendarTitle(selectedPeriod.start, selectedPeriod.end)}</h2>
+        <p className="print-subtitle">
+          Date range {selectedPeriod.label} • {formatMonthYear(selectedPeriod.start)}
+        </p>
+        {openSlots.length > 0 && (
+          <div className="print-warning">
+            Incomplete schedule: {openSlots.length} open slot{openSlots.length === 1 ? '' : 's'} remain in this date range.
+          </div>
+        )}
+      </header>
+
+      {options.includeLaborSummary && (
+        <section className="month-export-meta print-summary">
+          <div>
+            <span>Status</span>
+            <strong>{statusLabel}</strong>
+          </div>
+          <div>
+            <span>Scheduled hours</span>
+            <strong>{range.totalHours.toFixed(1)}</strong>
+          </div>
+          <div>
+            <span>Open slots</span>
+            <strong>{openSlots.length}</strong>
+          </div>
+          <div>
+            <span>Generated</span>
+            <strong>{formatPrintTimestamp(generatedAt)}</strong>
+          </div>
+          <div>
+            <span>Published</span>
+            <strong>{formatPrintTimestamp(publishedAt)}</strong>
+          </div>
+        </section>
+      )}
+
+      <section className="month-calendar" style={{ gridAutoRows: calendarCellHeight }}>
+        {DAYS.map((day) => (
           <div key={day} className="month-day-name">
-            {day}
+            {dayFullLabel(day)}
           </div>
         ))}
-        {Array.from({ length: leadingBlankDays }, (_, index) => (
-          <div key={`start-pad-${index}`} className="month-cell month-placeholder" aria-hidden="true" />
-        ))}
-        {calendarDays.map((date) => {
-          const isoDate = date.toISOString().slice(0, 10);
-          const assignments = (assignmentsByDate.get(isoDate) ?? []).sort((a, b) => (parseTime(a.start) ?? 0) - (parseTime(b.start) ?? 0));
 
-          return (
-            <div key={isoDate} className="month-cell">
-              <span className="month-date-number">{date.getDate()}</span>
-              <div className="month-cell-body">
-                {assignments.length ? (
-                  assignments.map((assignment) => (
-                    <p key={assignment.id}>
-                      {formatCalendarShiftLine(assignment.start, assignment.end, assignment.employeeName)}
-                    </p>
+        {calendarDays.map(({ date, inRange, items, openItems }) => (
+          <article key={date.toISOString()} className={inRange ? 'month-cell' : 'month-cell muted-month'}>
+            <div className="month-date-number">{date.getDate()}</div>
+            <div className="month-cell-body">
+              <div className="month-cell-lines">
+                {items.length ? (
+                  items.map((assignment) => (
+                    <div key={assignment.id} className="month-cell-line">
+                      <strong>{formatCalendarShiftLine(assignment.start, assignment.end, assignment.employeeName)}</strong>
+                      <span>{assignment.role || 'Coverage shift'}</span>
+                      {options.includeNotes && <p>{notesByBlockId.get(assignment.blockId) || 'General coverage'}</p>}
+                    </div>
                   ))
                 ) : (
-                  <span className="month-empty">&nbsp;</span>
+                  <p className="month-empty"> </p>
                 )}
+
+                {openItems.map((slot) => (
+                  <div key={slot.id} className="month-cell-line month-cell-line-open">
+                    <strong>{formatRange(slot.start, slot.end)}</strong>
+                    <span>
+                      Open slot {slot.openCount} / {slot.requiredStaff}
+                    </span>
+                    {options.includeNotes && <p>{slot.message}</p>}
+                  </div>
+                ))}
               </div>
             </div>
-          );
-        })}
-        {Array.from({ length: trailingBlankDays }, (_, index) => (
-          <div key={`end-pad-${index}`} className="month-cell month-placeholder" aria-hidden="true" />
+          </article>
         ))}
-      </div>
+      </section>
+
+      {options.showByEmployee && (
+        <section className="week-card">
+          <div className="mb-4">
+            <p className="eyebrow">By employee</p>
+            <h3>Assignments in range</h3>
+          </div>
+          <div className="calendar-grid">
+            {employeeGroups.length ? (
+              employeeGroups.map((group) => (
+                <article key={group.employeeId} className="day-card">
+                  <div className="day-card-header">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-950">{group.employeeName}</p>
+                      <p className="text-xs text-slate-500">
+                        {group.assignments.length} shift{group.assignments.length === 1 ? '' : 's'}
+                      </p>
+                    </div>
+                    <strong className="text-sm text-slate-950">{group.totalHours.toFixed(1)} hrs</strong>
+                  </div>
+                  <div className="calendar-blocks">
+                    {group.assignments.map((assignment) => (
+                      <div key={assignment.id} className="calendar-block">
+                        <div className="calendar-block-top">
+                          <span>{dayFullLabel(assignment.day)}</span>
+                          <strong>{formatRange(assignment.start, assignment.end)}</strong>
+                        </div>
+                        <div className="assigned-line">
+                          <span className="status-pill">{assignment.role || 'Coverage shift'}</span>
+                          {options.includeNotes && <span className="text-sm text-slate-500">{notesByBlockId.get(assignment.blockId) || 'General coverage'}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))
+            ) : (
+              <article className="day-card">
+                <p className="muted">No assignments were generated for this date range.</p>
+              </article>
+            )}
+          </div>
+        </section>
+      )}
     </div>
+  );
+}
+
+function PrintToggle({
+  label,
+  description,
+  checked,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-3 rounded-[20px] border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <input
+        className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus-visible:ring-2 focus-visible:ring-blue-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span className="space-y-1">
+        <span className="block text-sm font-semibold text-slate-900">{label}</span>
+        <span className="block text-xs leading-5 text-slate-500">{description}</span>
+      </span>
+    </label>
   );
 }
 

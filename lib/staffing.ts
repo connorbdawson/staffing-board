@@ -57,12 +57,22 @@ export type StaffingRequirement = {
   notes?: string;
 };
 
+export type StaffingPatternTemplate = {
+  id: string;
+  name: string;
+  description?: string;
+  requirements: Array<Omit<StaffingRequirement, 'id'>>;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AppState = {
   employees: Employee[];
   availability: Record<string, EmployeeAvailability>;
   businessHours: BusinessHours[];
   shiftTemplates: ShiftTemplate[];
   staffingRequirements: StaffingRequirement[];
+  staffingPatternTemplates: StaffingPatternTemplate[];
   scheduleOverrides: Record<string, string | null>;
   schedulePublishedAt: string | null;
   updatedAt: string;
@@ -88,6 +98,34 @@ export type ScheduleAlert = {
   day?: DayKey;
   date?: string;
   message: string;
+};
+
+export type OpenScheduleSlot = {
+  id: string;
+  date: string;
+  day: DayKey;
+  blockId: string;
+  slotIndex: number;
+  start: string;
+  end: string;
+  role: string;
+  requiredStaff: number;
+  assignedStaff: number;
+  openCount: number;
+  message: string;
+};
+
+export type ScheduleStatus = 'draft' | 'needsReview' | 'readyToPublish' | 'published';
+export type EmployeeEligibilityResult = {
+  employeeId: string;
+  employeeName: string;
+  eligible: boolean;
+  reason: string;
+  projectedHours: number;
+  maxAllowedWeeklyHours: number;
+  minPreferredWeeklyHours: number;
+  priorityLevel: number;
+  score: number;
 };
 
 export type GeneratedSchedule = {
@@ -204,6 +242,36 @@ export function containsRange(containerStart: string, containerEnd: string, inne
   const b2 = parseTime(innerEnd);
   if (a1 === null || a2 === null || b1 === null || b2 === null) return false;
   return a1 <= b1 && a2 >= b2;
+}
+
+function parseTimestamp(value: string | null) {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function hasScheduleIssues(openSlots: OpenScheduleSlot[], alerts: ScheduleAlert[]) {
+  return openSlots.length > 0 || alerts.some((alert) => alert.kind !== 'hours');
+}
+
+export function getScheduleStatus(params: {
+  openSlots: OpenScheduleSlot[];
+  alerts: ScheduleAlert[];
+  schedulePublishedAt: string | null;
+  updatedAt: string;
+}): ScheduleStatus {
+  const publishedAt = parseTimestamp(params.schedulePublishedAt);
+  const updatedAt = parseTimestamp(params.updatedAt);
+  const hasIssues = hasScheduleIssues(params.openSlots, params.alerts);
+
+  if (publishedAt !== null) {
+    if (updatedAt !== null && updatedAt > publishedAt) {
+      return hasIssues ? 'needsReview' : 'draft';
+    }
+    return 'published';
+  }
+
+  return hasIssues ? 'needsReview' : 'readyToPublish';
 }
 
 function rulesForDay(rules: WeeklyRule[], day: DayKey) {
@@ -777,6 +845,184 @@ export function generateScheduleRange(state: AppState, startDate: Date, endDate:
 
 export function scheduleAssignmentKey(assignment: Pick<ScheduleAssignment, 'date' | 'blockId' | 'slotIndex'>) {
   return `${assignment.date}:${assignment.blockId}:${assignment.slotIndex}`;
+}
+
+function requirementWithoutId(requirement: StaffingRequirement): Omit<StaffingRequirement, 'id'> {
+  const { id: _id, ...rest } = requirement;
+  return rest;
+}
+
+export function createTemplateFromRequirements(name: string, requirements: StaffingRequirement[]): StaffingPatternTemplate {
+  const timestamp = new Date().toISOString();
+  return {
+    id: uuid('tpl'),
+    name,
+    requirements: requirements.map(requirementWithoutId),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+export function applyStaffingPatternTemplate(template: StaffingPatternTemplate): StaffingRequirement[] {
+  return template.requirements.map((requirement) => ({
+    id: uuid('req'),
+    ...requirement,
+  }));
+}
+
+export function copyStaffingRequirementsFromDay(
+  requirements: StaffingRequirement[],
+  sourceDay: DayKey,
+  targetDays: DayKey[],
+): StaffingRequirement[] {
+  const sourceRequirements = requirements.filter((requirement) => requirement.day === sourceDay);
+  const uniqueTargets = [...new Set(targetDays)].filter((day) => day !== sourceDay);
+  const targetSet = new Set(uniqueTargets);
+
+  const preservedRequirements = requirements.filter((requirement) => !targetSet.has(requirement.day));
+
+  const copiedRequirements = uniqueTargets.flatMap((day) =>
+    sourceRequirements.map((requirement) => ({
+      id: uuid('req'),
+      day,
+      start: requirement.start,
+      end: requirement.end,
+      requiredStaff: requirement.requiredStaff,
+      role: requirement.role,
+      notes: requirement.notes,
+    })),
+  );
+
+  return [...preservedRequirements, ...copiedRequirements];
+}
+
+function firstMissingSlotIndex(assignments: ScheduleAssignment[], requiredStaff: number) {
+  const occupied = new Set(assignments.map((assignment) => assignment.slotIndex));
+  for (let slotIndex = 0; slotIndex < requiredStaff; slotIndex += 1) {
+    if (!occupied.has(slotIndex)) {
+      return slotIndex;
+    }
+  }
+  return assignments.length;
+}
+
+function dateForRequirement(schedule: GeneratedSchedule, requirement: StaffingRequirement) {
+  const assigned = schedule.assignments.find((assignment) => assignment.blockId === requirement.id);
+  if (assigned) return assigned.date;
+
+  const alert = schedule.alerts.find(
+    (entry) =>
+      entry.day === requirement.day &&
+      entry.date &&
+      entry.message.includes(`${requirement.start} - ${requirement.end}`),
+  );
+  return alert?.date ?? '';
+}
+
+export function deriveOpenSlots(schedule: GeneratedSchedule, requirements: StaffingRequirement[]): OpenScheduleSlot[] {
+  const assignmentsByBlock = new Map<string, ScheduleAssignment[]>();
+  schedule.assignments.forEach((assignment) => {
+    const current = assignmentsByBlock.get(assignment.blockId) ?? [];
+    current.push(assignment);
+    assignmentsByBlock.set(assignment.blockId, current);
+  });
+
+  return requirements.flatMap((requirement) => {
+    const assignments = assignmentsByBlock.get(requirement.id) ?? [];
+    const assignedStaff = assignments.length;
+    if (assignedStaff >= requirement.requiredStaff) return [];
+
+    const openCount = requirement.requiredStaff - assignedStaff;
+    const slotIndex = firstMissingSlotIndex(assignments, requirement.requiredStaff);
+    const date = dateForRequirement(schedule, requirement);
+
+    return [{
+      id: `open-${requirement.id}-${slotIndex}`,
+      date,
+      day: requirement.day,
+      blockId: requirement.id,
+      slotIndex,
+      start: requirement.start,
+      end: requirement.end,
+      role: requirement.role ?? '',
+      requiredStaff: requirement.requiredStaff,
+      assignedStaff,
+      openCount,
+      message: `${DAY_FULL_LABELS[requirement.day]} ${requirement.start} - ${requirement.end} is understaffed by ${openCount} employee(s).`,
+    }];
+  });
+}
+
+function sortEligibilityResults(results: EmployeeEligibilityResult[]) {
+  return [...results].sort((a, b) => {
+    if (a.eligible !== b.eligible) return a.eligible ? -1 : 1;
+    if (a.eligible && b.eligible) {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.priorityLevel !== a.priorityLevel) return b.priorityLevel - a.priorityLevel;
+      return a.employeeName.localeCompare(b.employeeName);
+    }
+    return a.employeeName.localeCompare(b.employeeName);
+  });
+}
+
+export function explainEmployeeEligibilityForRequirement(params: {
+  state: AppState;
+  requirement: StaffingRequirement;
+  weekStart: Date;
+  currentAssignments: Array<Pick<ScheduleAssignment, 'employeeId' | 'day' | 'start' | 'end'>>;
+  employeeHours: Record<string, number>;
+}): EmployeeEligibilityResult[] {
+  const { state, requirement, weekStart, currentAssignments, employeeHours } = params;
+  const date = isoDateForWeekDay(weekStart, requirement.day);
+  const blockHours = durationHours(requirement.start, requirement.end);
+  const assignedBlocks = currentAssignments.map((assignment) => ({
+    employeeId: assignment.employeeId,
+    day: assignment.day,
+    start: assignment.start,
+    end: assignment.end,
+  }));
+
+  const results = state.employees
+    .filter((employee) => employee.active)
+    .map((employee) => {
+      const currentHours = employeeHours[employee.id] ?? 0;
+      const projectedHours = currentHours + blockHours;
+      const score = candidateScore(employee, currentHours);
+      const base = {
+        employeeId: employee.id,
+        employeeName: employee.name,
+        projectedHours,
+        maxAllowedWeeklyHours: employee.maxAllowedWeeklyHours,
+        minPreferredWeeklyHours: employee.minPreferredWeeklyHours,
+        priorityLevel: employee.priorityLevel,
+        score,
+      };
+
+      if (projectedHours > employee.maxAllowedWeeklyHours) {
+        return {
+          ...base,
+          eligible: false,
+          reason: 'Would exceed max weekly hours.',
+        };
+      }
+
+      const allowed = canWorkBlock(employee.id, { day: requirement.day, start: requirement.start, end: requirement.end, date }, state, assignedBlocks);
+      if (!allowed.allowed) {
+        return {
+          ...base,
+          eligible: false,
+          reason: allowed.reason,
+        };
+      }
+
+      return {
+        ...base,
+        eligible: true,
+        reason: '',
+      };
+    });
+
+  return sortEligibilityResults(results);
 }
 
 function cloneDaySummaries(daySummaries: GeneratedSchedule['daySummaries']) {
